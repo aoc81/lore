@@ -1,0 +1,29 @@
+{
+  "_comment": "Reference only. `codex/install.py` GENERATES the real ~/.codex/hooks.json with your interpreter + absolute paths baked in. This shows the shape if you prefer to wire it by hand. Codex `command` is a single shell string (no args array).",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/usr/bin/python3\" \"/home/you/.codex/lore/recall.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/usr/bin/python3\" \"/home/you/.codex/lore/capture_check.py\" --codex",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

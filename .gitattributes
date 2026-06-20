@@ -1,0 +1,3 @@
+# Normalize all text to LF in the repo and on checkout. Critical for the shell
+# scripts (recall.sh, capture_check.sh, pre-push) — a CRLF shebang breaks on Unix.
+* text=auto eol=lf

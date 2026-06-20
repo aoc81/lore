@@ -1,0 +1,15 @@
+{
+  "name": "lore",
+  "displayName": "Lore",
+  "description": "A self-maintaining lore knowledge store for Claude Code: recall relevant past learnings into context, capture new ones, and keep them fresh.",
+  "version": "0.1.0",
+  "plugins": [
+    {
+      "name": "lore",
+      "displayName": "Lore",
+      "description": "Capture, recall, and keep fresh a project's learnings.",
+      "version": "0.1.0",
+      "source": "./plugin"
+    }
+  ]
+}

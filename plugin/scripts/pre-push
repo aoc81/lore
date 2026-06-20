@@ -1,0 +1,12 @@
+#!/bin/sh
+# Non-blocking freshness check installed by `/lore:init`.
+# Warns if any learning references a now-missing file; never fails the push.
+#
+# /lore:init copies verify_refs.py + _common.py into <repo>/.lore/ so this
+# hook stays self-contained (the plugin's own dir is an ephemeral cache).
+root=$(git rev-parse --show-toplevel)
+PY=$(command -v python3 || command -v python || command -v py)
+if [ -n "$PY" ] && [ -f "$root/.lore/verify_refs.py" ]; then
+  "$PY" "$root/.lore/verify_refs.py" || true
+fi
+exit 0
