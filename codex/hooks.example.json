@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/usr/bin/python3\" \"/home/you/.codex/lore/capture_check.py\" --codex",
+            "command": "\"/usr/bin/python3\" \"/home/you/.codex/lore/capture_check.py\"",
             "timeout": 30
           }
         ]

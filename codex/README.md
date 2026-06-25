@@ -2,15 +2,17 @@
 
 The same Lore — ambient recall + capture nudge + freshness — running on **OpenAI
 Codex** instead of Claude Code. Codex shipped a Claude-compatible hooks system, so
-this is a near 1:1 port: `recall.py` and the markdown store are reused **unchanged**,
-and only the install/packaging and the Stop-hook output format differ.
+this is a near 1:1 port: `recall.py`, `capture_check.py`, and the markdown store
+are reused **unchanged** — only the install/packaging differ. (The Stop hook now
+emits the same `{"decision":"block",...}` object on both targets, so there is no
+longer a Codex-specific output mode.)
 
 ## Why it ports cleanly
 
 | Lore mechanism | Codex equivalent | Notes |
 |---|---|---|
 | Recall (`UserPromptSubmit`) | `UserPromptSubmit` hook → `hookSpecificOutput.additionalContext` | **Identical JSON contract** to Claude Code — `recall.py` runs verbatim. |
-| Capture nudge (`Stop`) | `Stop` hook → `{"decision":"block","reason":...}` | Codex pushes the reminder as a continuation prompt; `capture_check.py --codex` emits this. Guarded by `stop_hook_active` (no loop). |
+| Capture nudge (`Stop`) | `Stop` hook → `{"decision":"block","reason":...}` | Codex pushes the reminder as a continuation prompt; `capture_check.py` emits this on stdout — the same object Claude Code now uses. Guarded by `stop_hook_active` (no loop). |
 | Capture guidance (skill) | Agent Skill (`SKILL.md`) | Installed to `~/.agents/skills/lore/`. |
 | Freshness linter | `verify_refs.py` | Run directly: `python3 ~/.codex/lore/verify_refs.py [--report\|--index\|--strict]`. |
 | Secret scan | `scan_secrets.py` | Run directly: `python3 ~/.codex/lore/scan_secrets.py` before sharing the store. |
@@ -48,9 +50,9 @@ Uninstall: `python3 codex/install.py --uninstall` (leaves your stores and the
 - **Every prompt**, Codex runs `recall.py`, which matches your prompt against each
   learning's `title`+`tags` and injects the top matches as `additionalContext` —
   same ambient recall as on Claude Code.
-- **At the end of each turn**, `capture_check.py --codex` returns a one-shot
-  `LORE CHECK` reminder; if a durable learning came up, Codex invokes the `lore`
-  skill to write it to `./learnings/`.
+- **At the end of each turn**, `capture_check.py` returns a one-shot `LORE CHECK`
+  reminder as a `decision:block` continuation prompt; if a durable learning came
+  up, Codex invokes the `lore` skill to write it to `./learnings/`.
 
 ## Caveats / differences from Claude Code
 
@@ -66,7 +68,6 @@ Uninstall: `python3 codex/install.py --uninstall` (leaves your stores and the
 
 ## What's shared vs Codex-specific
 
-- **Shared (unchanged):** `plugin/scripts/{recall,verify_refs,scan_secrets,_common}.py`,
+- **Shared (unchanged):** `plugin/scripts/{recall,capture_check,verify_refs,scan_secrets,_common}.py`,
   `plugin/skills/lore/SKILL.md`, `plugin/templates/*`, the store format.
-- **Codex-specific:** this folder — `install.py`, `hooks.example.json`, this README,
-  and the `--codex` output mode added to `plugin/scripts/capture_check.py`.
+- **Codex-specific:** this folder — `install.py`, `hooks.example.json`, and this README.

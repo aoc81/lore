@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """Stop hook: nudge the model to capture a durable learning -- once per turn.
 
-Default (Claude Code): writes the reminder to stderr and exits 2, which feeds it
-back to the model. With `--codex` (OpenAI Codex Stop hook): prints a
-{"decision":"block","reason":...} object on stdout instead -- Codex's documented
-way to push a continuation prompt (additionalContext is not supported on Stop).
-Both honor `stop_hook_active` so the nudge fires once per stop, never loops.
+Delivery: a `{"decision":"block","reason":...}` JSON object on STDOUT (exit 0).
+This is the contract the Claude Code CLI, the VS Code extension, AND OpenAI
+Codex all honor to push the reminder back as a continuation prompt, so the
+model acts on it in the same turn.
+
+DO NOT switch this back to the `stderr + exit 2` pattern: the Claude Code VS
+Code extension (claude-vscode, verified on 2.1.191) silently discards a non-zero
+Stop hook as a "non-blocking status code" -- the reminder lands in `hookErrors`
+with `preventedContinuation:false` and NEVER reaches the model, so autonomous
+capture looks dead even though the hook runs every turn.
+
+`stop_hook_active` (read from stdin) makes the nudge fire once per stop, never
+looping. The `--codex` flag is accepted for backward compat but no longer
+changes behavior -- both targets use the same stdout object.
 """
 import json
 import sys
@@ -28,7 +37,7 @@ REMINDER = (
 
 
 def main():
-    codex = "--codex" in sys.argv[1:]
+    """Emit the capture nudge as a stdout `decision: block` object."""
     raw = sys.stdin.read()
     try:
         data = json.loads(raw) if raw.strip() else {}
@@ -36,11 +45,10 @@ def main():
         data = {}
     if data.get("stop_hook_active"):
         return 0  # already nudged for this stop; don't loop
-    if codex:
-        print(json.dumps({"decision": "block", "reason": REMINDER}))
-        return 0  # Codex reads the continuation prompt from stdout JSON
-    sys.stderr.write(REMINDER)
-    return 2  # Claude: stderr feedback + exit 2
+    # Block the stop and feed the reminder back. stdout JSON is the only channel
+    # the VS Code extension honors (stderr+exit-2 is discarded -- see module doc).
+    print(json.dumps({"decision": "block", "reason": REMINDER}))
+    return 0
 
 
 if __name__ == "__main__":

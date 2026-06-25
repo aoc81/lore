@@ -48,7 +48,7 @@ def _is_ours(command, lore_dir):
 def _merge_hooks(hooks_path, lore_dir):
     py = sys.executable
     recall = f'"{py}" "{(lore_dir / "recall.py").as_posix()}"'
-    capture = f'"{py}" "{(lore_dir / "capture_check.py").as_posix()}" --codex'
+    capture = f'"{py}" "{(lore_dir / "capture_check.py").as_posix()}"'
     groups = {
         "UserPromptSubmit": {"matcher": "", "hooks": [
             {"type": "command", "command": recall, "timeout": 30}]},
