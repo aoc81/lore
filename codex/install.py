@@ -29,7 +29,7 @@ SRC = HERE.parent / "plugin"                       # shared core lives under plu
 SCRIPTS = SRC / "scripts"
 SKILL_SRC = SRC / "skills" / "lore" / "SKILL.md"
 TEMPLATES = SRC / "templates"
-CORE = ["recall.py", "capture_check.py", "verify_refs.py", "_common.py"]
+CORE = ["recall.py", "capture_check.py", "verify_refs.py", "scan_secrets.py", "_common.py"]
 
 
 def codex_home():
@@ -139,7 +139,10 @@ def scaffold_store(target):
     shutil.copy2(TEMPLATES / "_TEMPLATE.md", store / "_TEMPLATE.md")
     shutil.copy2(TEMPLATES / "example-learning.md", store / "examples" / "example-learning.md")
     print(f"Scaffolded learnings store at {store}")
-    print("  Committed by default (a team store). Add 'learnings/' to .gitignore to keep it private.")
+    print("  Committed and pushed by default (a team store) — treat it as PUBLISHED:")
+    print("  never quote a secret/credential/PII in a learning. Scan before sharing:")
+    print(f"    {sys.executable} {codex_home() / 'lore' / 'scan_secrets.py'}")
+    print("  To keep it private instead, add 'learnings/' to .gitignore.")
     return 0
 
 

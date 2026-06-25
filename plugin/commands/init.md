@@ -13,16 +13,23 @@ this only scaffolds.
    - `${CLAUDE_PLUGIN_ROOT}/templates/_TEMPLATE.md` → `<storeDir>/_TEMPLATE.md`
    - `${CLAUDE_PLUGIN_ROOT}/templates/example-learning.md` → `<storeDir>/examples/example-learning.md`
    If it already exists, leave existing files untouched and just report what's there.
-3. Ask the user whether to install the **non-blocking pre-push freshness hook**
-   (warns when a learning references a deleted file). If yes:
-   - Create `${CLAUDE_PROJECT_DIR}/.lore/` and copy `${CLAUDE_PLUGIN_ROOT}/scripts/verify_refs.py`
-     and `${CLAUDE_PLUGIN_ROOT}/scripts/_common.py` into it (so the hook is self-contained
-     and survives plugin updates — the plugin's own dir is an ephemeral cache).
+3. Ask the user whether to install the **pre-push hook**. It does two things: a
+   **blocking secret scan** (aborts the push if a learning quotes a likely key,
+   token, or credential — the store is published by default, so this is the guard
+   that keeps an auto-captured secret from leaking) and a **non-blocking freshness
+   check** (warns when a learning references a deleted file). If yes:
+   - Create `${CLAUDE_PROJECT_DIR}/.lore/` and copy `${CLAUDE_PLUGIN_ROOT}/scripts/scan_secrets.py`,
+     `${CLAUDE_PLUGIN_ROOT}/scripts/verify_refs.py`, and `${CLAUDE_PLUGIN_ROOT}/scripts/_common.py`
+     into it (so the hook is self-contained and survives plugin updates — the plugin's
+     own dir is an ephemeral cache).
    - Install the hook: if the repo has no custom `core.hooksPath` and no existing
      `pre-push`, copy `${CLAUDE_PLUGIN_ROOT}/scripts/pre-push` to `.git/hooks/pre-push`
      and make it executable (`chmod +x`). If a custom `core.hooksPath` is set OR a
      `pre-push` already exists, do NOT overwrite — show the user the one-line snippet
      to add to their existing hook instead.
 4. Print a summary: store path, files created, whether the hook was installed.
-   Remind the user that learnings are **committed by default (team-shared)** — to keep
-   them private, add the store directory to `.gitignore`.
+   Remind the user that learnings are **committed and pushed by default (team-shared)**
+   — so treat the store as published: never paste a secret/credential/PII into a
+   learning (reference it, don't quote it). To keep the store private instead, add the
+   store directory to `.gitignore`. The pre-push secret scan is a backstop, not a
+   substitute for not writing secrets in the first place.

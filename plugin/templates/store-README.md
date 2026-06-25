@@ -9,3 +9,7 @@ managed by the [`lore`](https://github.com/) Claude Code plugin.
 
 Add an entry by copying `_TEMPLATE.md` into a category folder. See `examples/` for a
 sample, and run `/lore:lint --index` once you have real entries.
+
+> **This store is committed and pushed by default — treat it as published.** Never
+> quote a secret, credential, token, or PII in a learning; reference it instead. The
+> pre-push hook runs a blocking secret scan (`/lore:scan`) as a backstop.

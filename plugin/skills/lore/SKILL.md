@@ -44,6 +44,18 @@ manufacture a learning just to produce output.
 Skip: things the repo already records (what a function does, a fix git blame
 explains); one-off facts; restatements of existing docs (update those instead).
 
+## Never write a secret into a learning
+
+The store is **committed and pushed by default**, and you capture autonomously —
+so a learning is effectively *published the moment you write it*. Never paste a
+secret, credential, API key, token, private key, connection string, or personal
+data into an entry. **Reference it, don't quote it**: write "the prod DB
+password (in the team vault / 1Password)", never the value itself. The same goes
+for a real bug repro — describe the shape of the input, not a live token. A
+pre-push secret scan is the backstop, but the entry should never contain the
+secret in the first place. If a learning can't be told without a secret, it
+doesn't belong in the store.
+
 ## Steps
 
 1. **Classify the track** — *bug* (a concrete failure diagnosed and fixed — capture

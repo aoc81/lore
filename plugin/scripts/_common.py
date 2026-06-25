@@ -8,6 +8,7 @@ DEFAULTS = {
     "storeDir": "learnings",
     "maxRecall": 5,
     "staleStatuses": ["superseded", "obsolete", "deprecated"],
+    "secretAllow": [],  # regexes whose match on a line suppresses secret-scan findings
 }
 
 

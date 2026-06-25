@@ -13,6 +13,7 @@ and only the install/packaging and the Stop-hook output format differ.
 | Capture nudge (`Stop`) | `Stop` hook → `{"decision":"block","reason":...}` | Codex pushes the reminder as a continuation prompt; `capture_check.py --codex` emits this. Guarded by `stop_hook_active` (no loop). |
 | Capture guidance (skill) | Agent Skill (`SKILL.md`) | Installed to `~/.agents/skills/lore/`. |
 | Freshness linter | `verify_refs.py` | Run directly: `python3 ~/.codex/lore/verify_refs.py [--report\|--index\|--strict]`. |
+| Secret scan | `scan_secrets.py` | Run directly: `python3 ~/.codex/lore/scan_secrets.py` before sharing the store. |
 | Store | `learnings/` markdown | Per-project, tool-agnostic — created on first capture or via `--store`. |
 
 ## Install
@@ -65,7 +66,7 @@ Uninstall: `python3 codex/install.py --uninstall` (leaves your stores and the
 
 ## What's shared vs Codex-specific
 
-- **Shared (unchanged):** `plugin/scripts/{recall,verify_refs,_common}.py`,
+- **Shared (unchanged):** `plugin/scripts/{recall,verify_refs,scan_secrets,_common}.py`,
   `plugin/skills/lore/SKILL.md`, `plugin/templates/*`, the store format.
 - **Codex-specific:** this folder — `install.py`, `hooks.example.json`, this README,
   and the `--codex` output mode added to `plugin/scripts/capture_check.py`.

@@ -34,11 +34,13 @@ and keep them from going stale as the code changes. Each task makes the next one
             ▼
    ┌─────────────────────┐   linter + pre-push hook
    │  keep it fresh       │── flag deleted refs · drift-triage · regenerate index
+   │  + guard the push    │── secret scan blocks a leak before it's published
    └─────────────────────┘
 ```
 
 The store is plain markdown in **your** repo (committed, so your team benefits). The
 behavior lives in the plugin. Nothing is sent anywhere — recall is a local text match.
+Because the store is pushed by default, treat it as **published**: see [Security](#security).
 
 ## Requirements
 
@@ -99,6 +101,7 @@ the store's README. The optional pre-push hook runs the existence check before e
 | `/lore:capture [note]` | Capture a learning from the current work (via the skill). |
 | `/lore:lint [--report\|--index\|--strict]` | Freshness linter: ref-check, drift triage, index regen. |
 | `/lore:sweep [scope]` | Semantically re-verify drifted entries against the code and update them. |
+| `/lore:scan [path]` | Scan the store for committed secrets (the pre-push guard, run on demand). |
 
 These are **Claude Code** slash commands. On Codex there are no `/lore:*` commands —
 `init` is `python3 codex/install.py`, `capture` is the `lore` skill + the `Stop` hook,
@@ -136,14 +139,40 @@ Optional `.lore.json` in your project root:
 {
   "storeDir": "learnings",
   "maxRecall": 5,
-  "staleStatuses": ["superseded", "obsolete", "deprecated"]
+  "staleStatuses": ["superseded", "obsolete", "deprecated"],
+  "secretAllow": ["\\bAKIAEXAMPLE\\b"]
 }
 ```
 
+`secretAllow` is a list of regexes; a match on a line suppresses secret-scan
+findings there (for genuine false positives or illustrative examples).
+
 ## Committed vs. private
 
-Learnings are **committed by default** so a whole team shares them. To keep them
-local/personal instead, add your store directory (e.g. `learnings/`) to `.gitignore`.
+Learnings are **committed and pushed by default** so a whole team shares them. To keep
+them local/personal instead, add your store directory (e.g. `learnings/`) to `.gitignore`.
+
+## Security
+
+The store is committed and pushed by default and capture is autonomous — so a learning
+is effectively **published the moment it's written**. The plugin is built around that:
+
+- **Don't write secrets.** The capture skill is instructed to *reference* secrets, never
+  quote them (no keys, tokens, credentials, connection strings, or PII in an entry).
+- **Blocking secret scan at the push boundary.** The pre-push hook runs `scan_secrets.py`
+  over the store and **aborts the push** if it finds a likely key/token/credential.
+  Run it any time with `/lore:scan`. Bypass a false positive with `lore:allow-secret` on
+  the line, a `secretAllow` regex, `LORE_SCAN_BLOCK=0`, or `git push --no-verify`.
+- **Recall never echoes bodies.** The recall hook matches only `title` + `tags` and emits
+  only paths + titles — store content is never auto-injected verbatim, which limits the
+  prompt-injection surface of a shared/poisoned store.
+- **Hooks run code on every turn.** Recall and capture execute local Python on each prompt
+  and turn-end. Review the scripts before trusting them; on Codex, approve them via `/hooks`.
+- **Pin the plugin.** Install a reviewed tag/commit rather than floating on `main`, so you
+  control when new hook code starts running.
+
+Everything runs locally with no network calls; the only thing that ever leaves your
+machine is what *you* push — which is exactly what the secret scan guards.
 
 ## Customizing
 

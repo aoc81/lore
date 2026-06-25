@@ -1,11 +1,33 @@
 #!/bin/sh
-# Non-blocking freshness check installed by `/lore:init`.
-# Warns if any learning references a now-missing file; never fails the push.
+# Lore pre-push hook installed by `/lore:init`. Two checks:
+#   1. Secret scan (BLOCKING) — the learnings store is committed and pushed by
+#      default and capture is autonomous, so a learning that quotes a real key
+#      would be published. If scan_secrets.py finds one, the push is aborted.
+#   2. Freshness (non-blocking) — warns if a learning references a now-missing
+#      file; never fails the push.
 #
-# /lore:init copies verify_refs.py + _common.py into <repo>/.lore/ so this
-# hook stays self-contained (the plugin's own dir is an ephemeral cache).
+# /lore:init copies scan_secrets.py + verify_refs.py + _common.py into
+# <repo>/.lore/ so this hook stays self-contained (the plugin's own dir is an
+# ephemeral cache).
+#
+# Escape hatches: `git push --no-verify` skips all git hooks; LORE_SCAN_BLOCK=0
+# downgrades the secret scan to a warning for one push.
 root=$(git rev-parse --show-toplevel)
 PY=$(command -v python3 || command -v python || command -v py)
+
+if [ -n "$PY" ] && [ -f "$root/.lore/scan_secrets.py" ]; then
+  if ! "$PY" "$root/.lore/scan_secrets.py" --quiet; then
+    if [ "$LORE_SCAN_BLOCK" = "0" ]; then
+      echo "lore: secrets found but LORE_SCAN_BLOCK=0 — allowing push anyway." >&2
+    else
+      echo "" >&2
+      echo "lore: push ABORTED — a likely secret is in the learnings store (see above)." >&2
+      echo "      Remove/rotate it, or bypass with: git push --no-verify" >&2
+      exit 1
+    fi
+  fi
+fi
+
 if [ -n "$PY" ] && [ -f "$root/.lore/verify_refs.py" ]; then
   "$PY" "$root/.lore/verify_refs.py" || true
 fi
