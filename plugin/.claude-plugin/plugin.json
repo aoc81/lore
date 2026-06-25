@@ -1,6 +1,6 @@
 {
   "name": "lore",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Capture, recall, and keep fresh a project's hard-won learnings — a self-maintaining knowledge store. Each task makes the next one easier.",
   "author": { "name": "Angel" },
   "keywords": ["learnings", "memory", "knowledge-base", "hooks", "recall", "lessons-learned"]

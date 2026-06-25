@@ -60,8 +60,16 @@ doesn't belong in the store.
 
 1. **Classify the track** — *bug* (a concrete failure diagnosed and fixed — capture
    the trap, not just the patch) or *knowledge* (a pattern, decision, or constraint).
-2. **Overlap check** — search the store for an existing entry on the same thing.
-   High overlap → update it in place (don't create a near-duplicate). Low/none → new file.
+2. **Overlap check** — before writing, run the deterministic overlap check so you
+   UPDATE an existing entry instead of duplicating it:
+   ```sh
+   PY=$(command -v python3 || command -v python || command -v py)
+   R="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/scripts/}recall.py"
+   [ -f "$R" ] || R="$HOME/.codex/lore/recall.py"   # Codex install location
+   "$PY" "$R" --query "<draft title + tags>"
+   ```
+   It lists the top existing entries by the same scorer the recall hook uses.
+   High overlap with a listed entry → update it in place. Low/none → new file.
 3. **Write one file** — `<storeDir>/<category>/<kebab-slug>.md` (no date in the filename).
 4. **Refresh the index** — run `/lore:lint --index` so the store README lists it.
 

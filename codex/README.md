@@ -14,15 +14,17 @@ longer a Codex-specific output mode.)
 | Recall (`UserPromptSubmit`) | `UserPromptSubmit` hook → `hookSpecificOutput.additionalContext` | **Identical JSON contract** to Claude Code — `recall.py` runs verbatim. |
 | Capture nudge (`Stop`) | `Stop` hook → `{"decision":"block","reason":...}` | Codex pushes the reminder as a continuation prompt; `capture_check.py` emits this on stdout — the same object Claude Code now uses. Guarded by `stop_hook_active` (no loop). |
 | Capture guidance (skill) | Agent Skill (`SKILL.md`) | Installed to `~/.agents/skills/lore/`. |
-| Freshness linter | `verify_refs.py` | Run directly: `python3 ~/.codex/lore/verify_refs.py [--report\|--index\|--strict]`. |
+| Freshness linter | `verify_refs.py` | Run directly: `python3 ~/.codex/lore/verify_refs.py [--report\|--stats\|--index\|--strict]`. |
 | Secret scan | `scan_secrets.py` | Run directly: `python3 ~/.codex/lore/scan_secrets.py` before sharing the store. |
 | Store | `learnings/` markdown | Per-project, tool-agnostic — created on first capture or via `--store`. |
 
 ## Install
 
-From a clone of this repo:
+Clone the repo and run the installer:
 
 ```sh
+git clone https://github.com/aoc81/lore
+cd lore
 python3 codex/install.py
 ```
 
@@ -60,6 +62,10 @@ Uninstall: `python3 codex/install.py --uninstall` (leaves your stores and the
   (security feature; expected).
 - **`[features] hooks` default** is inconsistent across Codex docs, so the installer
   sets it explicitly to `true`.
+- **No edit-time recall.** The `PreToolUse` hook that surfaces a file's learnings
+  the moment you edit it is wired by the **Claude Code** plugin only; the Codex
+  installer registers `UserPromptSubmit` (recall) + `Stop` (capture). Prompt-time
+  recall, the capture overlap check, and freshness are identical.
 - **No `/lore:*` slash commands.** Codex custom prompts are user-local and can't be
   namespaced/shared, so the Claude commands map to: install script (`init`), the
   `lore` skill + Stop hook (`capture`), and direct `verify_refs.py` calls (`lint`).

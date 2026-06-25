@@ -8,6 +8,18 @@ and keep them from going stale as the code changes. Each task makes the next one
 > Every unit of work should leave behind something that makes
 > the next unit of work cheaper. This plugin is that flywheel for a codebase.
 
+## See it in action
+
+A hooks plugin is invisible by design — here's the part you'd otherwise never
+see: **recall appears on its own** (you ran no command), and the **LORE CHECK**
+nudge closes the turn so capture never silently gets skipped.
+
+![lore in action — recall surfaces a relevant past learning automatically, then the LORE CHECK capture nudge fires at the end of the turn](lore-in-action.svg)
+
+<sub>The terminal output is **real** — produced by the actual `recall.py` /
+`capture_check.py` hooks against the shipped example learning; only the typing
+pace is scripted.</sub>
+
 ## The loop
 
 ```
@@ -55,7 +67,7 @@ Because the store is pushed by default, treat it as **published**: see [Security
 ### Claude Code
 
 ```text
-/plugin marketplace add <your-org>/lore
+/plugin marketplace add aoc81/lore
 /plugin install lore@lore
 ```
 
@@ -81,17 +93,24 @@ caveats: **[codex/README.md](codex/README.md)**.
 **Recall (read).** On every prompt, a `UserPromptSubmit` hook tokenizes what you typed,
 matches it against each learning's `title` + `tags` (never the body), and injects the
 top few matches as paths + titles. The agent reads a file only if it's actually relevant.
-Superseded entries are down-ranked and tagged so they're never mistaken for live guidance.
+Superseded entries are down-ranked and tagged so they're never mistaken for live guidance,
+and each match carries cheap freshness flags (a deleted-file ref, or "verified N months
+ago") so a possibly-stale learning is never trusted blindly. A `PreToolUse` hook adds
+**edit-time recall**: when the agent is about to edit a file, any learning whose `files:`
+names that path surfaces right then — the gotcha shows up exactly when you touch the code.
 
 **Capture (write).** A `Stop` hook reminds the agent, at the end of a turn, to record a
-learning *only* if it's both non-obvious and reusable. The `lore` skill
-defines the gate, the routing, and the file format. You can also trigger it with
-`/lore:capture`.
+learning *only* if it's both non-obvious and reusable. The `lore` skill defines the gate,
+the routing, and the file format. Before writing, it runs a deterministic overlap check
+(`recall.py --query`) so a new learning **updates** a related entry instead of duplicating
+it. You can also trigger capture with `/lore:capture`.
 
 **Freshness.** Code changes; learnings shouldn't silently rot. `/lore:lint` checks
 that each entry's `files:` still exist; `--report` ranks entries whose referenced code
 changed since they were last `verified:` (your re-verify worklist); `--index` regenerates
-the store's README. The optional pre-push hook runs the existence check before every push.
+the store's README. `/lore:stats` prints a store-health snapshot (counts by status/category,
+the drift backlog, long-unverified entries, dangling links). The optional pre-push hook runs
+the existence check before every push.
 
 ## Commands
 
@@ -100,6 +119,7 @@ the store's README. The optional pre-push hook runs the existence check before e
 | `/lore:init` | Scaffold the store in this project; optionally install the pre-push hook. |
 | `/lore:capture [note]` | Capture a learning from the current work (via the skill). |
 | `/lore:lint [--report\|--index\|--strict]` | Freshness linter: ref-check, drift triage, index regen. |
+| `/lore:stats` | Store-health snapshot: counts, drift backlog, stale-age, dangling links. |
 | `/lore:sweep [scope]` | Semantically re-verify drifted entries against the code and update them. |
 | `/lore:scan [path]` | Scan the store for committed secrets (the pre-push guard, run on demand). |
 
