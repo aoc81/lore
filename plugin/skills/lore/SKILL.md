@@ -71,7 +71,17 @@ doesn't belong in the store.
    It lists the top existing entries by the same scorer the recall hook uses.
    High overlap with a listed entry → update it in place. Low/none → new file.
 3. **Write one file** — `<storeDir>/<category>/<kebab-slug>.md` (no date in the filename).
-4. **Refresh the index** — run `/lore:lint --index` so the store README lists it.
+4. **Scan what you just wrote** — run the secret scanner on the new/updated file
+   so a leak is caught at write time, not at push time:
+   ```sh
+   PY=$(command -v python3 || command -v python || command -v py)
+   S="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/scripts/}scan_secrets.py"
+   [ -f "$S" ] || S="$HOME/.codex/lore/scan_secrets.py"   # Codex install location
+   "$PY" "$S" <path-to-the-file-you-wrote>
+   ```
+   If it flags anything, fix the entry **before ending the turn** (reference the
+   secret, never quote it). The pre-push hook is the backstop, not the plan.
+5. **Refresh the index** — run `/lore:lint --index` so the store README lists it.
 
 `storeDir` defaults to `learnings/` (override in `.lore.json`). `category` is
 free-form — reuse an existing folder name when one fits, otherwise add one.
@@ -85,7 +95,10 @@ date: YYYY-MM-DD          # today, absolute
 track: bug | knowledge
 category: <free-form, e.g. build, ci, api, frontend, infra>
 tags: [k1, k2, k3]        # recall matches the prompt against title + tags — use words a future prompt would
-files: [path/to/code.ext] # the code this is about; the linter checks these still exist
+files: [path/to/code.ext] # the code this is about; the linter checks these still exist.
+                          # A ref may be an exact path, a directory prefix (src/auth/),
+                          # or a glob (src/auth/*.py) — dir/glob refs also power
+                          # edit-time recall for every file they cover.
 status: current
 verified: YYYY-MM-DD       # optional; set when you confirm the claim against current code
 ---

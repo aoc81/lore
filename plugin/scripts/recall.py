@@ -8,12 +8,18 @@ nothing matches.
 
 As a CLI (`recall.py --query "<text>"`): print the same ranked matches in plain
 text -- used as the capture-time overlap check so a new learning UPDATES an
-existing entry instead of creating a near-duplicate.
+existing entry instead of creating a near-duplicate, and by `/lore:search`.
 
 As a `PreToolUse` hook (`recall.py --pretool`, tool JSON on stdin): when about to
-Edit/Write a file, surface learnings whose frontmatter `files:` lists that path --
-edit-time recall, so a gotcha shows up exactly when you touch the code. Silent
-unless a learning names the target file.
+Edit/Write a file, surface learnings whose frontmatter `files:` covers that path
+(exact, directory prefix `dir/`, or glob) -- edit-time recall, so a gotcha shows
+up exactly when you touch the code. Silent unless a learning names the target.
+
+Matching is word-boundary, not substring: an exact word hit scores 2, a >=4-char
+prefix overlap (stemming-ish: "test"/"testing") scores 1, and an entry needs a
+score of 2 to surface at all -- so "auth" never matches "author" and one weak
+prefix hit never injects noise. Short prompt words (2-3 chars: "ci", "api",
+"aws") match only EXACT tags, where they are curated vocabulary.
 
 Entries whose status is superseded/obsolete/deprecated stay matchable (their
 transferable principle is still useful) but get a 1-point rank penalty and are
@@ -23,6 +29,10 @@ Each surfaced entry also carries cheap freshness flags so a possibly-stale
 learning is never trusted blindly: a `current` entry that points at a
 now-deleted file is flagged, and a long-unverified entry shows its age. The
 costly git-drift check stays in verify_refs.py (--report), out of the hook.
+
+Every surfaced entry is also appended to `.git/lore-recall.log` (local only,
+never committed -- it lives inside .git) so `/lore:stats` can report which
+entries actually get used and which never surface.
 """
 import datetime
 import json
@@ -32,7 +42,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import find_project_dir, iter_entries, load_config  # noqa: E402
+from _common import (find_project_dir, iter_entries, load_config,  # noqa: E402
+                     norm_rel, ref_exists, ref_matches)
 
 # Generic words that would over-match. Domain words are intentionally absent.
 STOP = {
@@ -50,6 +61,11 @@ STOP = {
 # Flag an entry as possibly stale when its last check is older than this.
 STALE_AFTER_MONTHS = 6
 STALE_STATUSES = ("superseded", "obsolete", "deprecated")
+
+# An entry must reach this score to surface (one exact word, or two prefixes).
+MIN_SCORE = 2
+
+_WORD = re.compile(r"[a-z0-9_]+")
 
 
 def _months_since(iso):
@@ -72,7 +88,7 @@ def freshness_flags(e, project):
     """
     flags = []
     if e["status"] not in STALE_STATUSES:
-        missing = [f for f in e["files"] if f and not (project / f).exists()]
+        missing = [f for f in e["files"] if f and not ref_exists(project, f)]
         if missing:
             flags.append("! refs a deleted file")
     stamp = e["verified"] or e["date"]
@@ -83,24 +99,47 @@ def freshness_flags(e, project):
     return flags
 
 
+def score_entry(tokens, short, e):
+    """Word-boundary score of one entry against prompt tokens.
+
+    tokens: >=4-char prompt words (exact hay word = 2, >=4-char prefix
+    overlap = 1). short: 2-3 char prompt words, matched only against exact
+    tag words -- tags are curated, so "ci"/"api"/"aws" stay findable without
+    letting short common words over-match titles.
+    """
+    hay_words = set(_WORD.findall(
+        (e["title"] + " " + " ".join(e["tags"])).lower()))
+    if not hay_words:
+        return 0
+    long_hay = [w for w in hay_words if len(w) >= 4]
+    score = 0
+    for t in tokens:
+        if t in hay_words:
+            score += 2
+        elif any(w.startswith(t) or t.startswith(w) for w in long_hay):
+            score += 1
+    if short:
+        tag_words = set(_WORD.findall(" ".join(e["tags"]).lower()))
+        score += sum(2 for s in short if s in tag_words)
+    return score
+
+
 def rank_matches(text, store, cfg):
-    """Rank store entries by title+tags token overlap with `text`.
+    """Rank store entries by title+tags word overlap with `text`.
 
     Returns [(stale_bool, entry), ...] best-first, capped to maxRecall.
     Same scorer for the prompt hook and the capture-time overlap check.
     """
-    tokens = {t for t in re.findall(r"[a-z0-9_]{4,}", text.lower())
-              if t not in STOP}
-    if not tokens:
+    words = _WORD.findall(text.lower())
+    tokens = {w for w in words if len(w) >= 4 and w not in STOP}
+    short = {w for w in words if 2 <= len(w) < 4}
+    if not tokens and not short:
         return []
     stale_set = set(cfg["staleStatuses"])
     found = []
     for e in iter_entries(store):
-        hay = (e["title"] + " " + " ".join(e["tags"])).lower()
-        if not hay.strip():
-            continue
-        score = sum(1 for t in tokens if t in hay)
-        if score:
+        score = score_entry(tokens, short, e)
+        if score >= MIN_SCORE:
             stale = e["status"] in stale_set
             # rank: effective score (stale -1), current-before-stale on ties
             found.append((score - (1 if stale else 0), 1 if stale else 0,
@@ -109,21 +148,16 @@ def rank_matches(text, store, cfg):
     return [(stale, e) for _eff, _s, stale, e in found[: cfg["maxRecall"]]]
 
 
-def _norm(p):
-    p = p.strip().replace("\\", "/")
-    return p[2:] if p.startswith("./") else p
-
-
 def match_by_file(target_rel, store):
-    """Learnings whose frontmatter `files:` names `target_rel` (exact rel path).
+    """Learnings whose frontmatter `files:` covers `target_rel`.
 
-    Returns [(stale_bool, entry), ...]. The match key is the file you're about
-    to edit, not prompt tokens -- this powers edit-time (PreToolUse) recall.
+    A ref matches as an exact path, a directory prefix (`src/auth/`), or a
+    glob (`src/auth/*.py`). The match key is the file you're about to edit,
+    not prompt tokens -- this powers edit-time (PreToolUse) recall.
     """
-    target = _norm(target_rel)
     matches = []
     for e in iter_entries(store):
-        if any(_norm(f) == target for f in e["files"] if f):
+        if any(ref_matches(f, target_rel) for f in e["files"] if f):
             matches.append((e["status"] in STALE_STATUSES, e))
     return matches
 
@@ -136,6 +170,37 @@ def _format_entry(e, stale, project):
     bits.extend(freshness_flags(e, project))
     tag = f"  [{' | '.join(bits)}]" if bits else ""
     return f"- {rel} - {e['title']}{tag}"
+
+
+# --- local usage telemetry ---------------------------------------------------
+_LOG_MAX_BYTES = 262144
+_LOG_KEEP_LINES = 1500
+
+
+def log_recall(project, kind, entries):
+    """Append surfaced entries to `.git/lore-recall.log` (never committed).
+
+    Best-effort and silent: telemetry must never break the hook. Skipped when
+    `.git` is not a directory (bare repos, worktrees, no git).
+    """
+    try:
+        git_dir = Path(project) / ".git"
+        if not git_dir.is_dir():
+            return
+        log = git_dir / "lore-recall.log"
+        today = datetime.date.today().isoformat()
+        lines = [
+            f"{today}\t{kind}\t{e['path'].relative_to(project).as_posix()}\n"
+            for e in entries
+        ]
+        if log.exists() and log.stat().st_size > _LOG_MAX_BYTES:
+            tail = log.read_text(encoding="utf-8",
+                                 errors="replace").splitlines(True)
+            log.write_text("".join(tail[-_LOG_KEEP_LINES:]), encoding="utf-8")
+        with log.open("a", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
 
 
 def run_hook():
@@ -157,6 +222,7 @@ def run_hook():
     matches = rank_matches(prompt, store, cfg)
     if not matches:
         return
+    log_recall(project, "prompt", [e for _s, e in matches])
     lines = [_format_entry(e, stale, project) for stale, e in matches]
     ctx = (
         "Possibly-relevant prior learnings (Read a file only if it applies to "
@@ -211,12 +277,13 @@ def run_pretool():
     try:
         rel = Path(fp).resolve().relative_to(project.resolve()).as_posix()
     except (ValueError, OSError):
-        rel = _norm(fp)
+        rel = norm_rel(fp)
     matches = match_by_file(rel, store)
     if not matches:
         return  # stay silent unless a learning names this file
-    lines = [_format_entry(e, stale, project)
-             for stale, e in matches[: cfg["maxRecall"]]]
+    matches = matches[: cfg["maxRecall"]]
+    log_recall(project, "edit", [e for _s, e in matches])
+    lines = [_format_entry(e, stale, project) for stale, e in matches]
     ctx = (
         f"Lore -- learnings recorded about `{rel}` (consider before editing):\n"
         + "\n".join(lines)

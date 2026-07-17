@@ -22,6 +22,11 @@ this only scaffolds.
      `${CLAUDE_PLUGIN_ROOT}/scripts/verify_refs.py`, and `${CLAUDE_PLUGIN_ROOT}/scripts/_common.py`
      into it (so the hook is self-contained and survives plugin updates — the plugin's
      own dir is an ephemeral cache).
+   - Stamp the copies: read `version` from `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json`
+     and write it (just the version string) to `${CLAUDE_PROJECT_DIR}/.lore/VERSION`.
+     The linter compares this stamp against the running plugin and tells the user to
+     re-run `/lore:init` when the copies fall behind. (If `.lore/` already exists from
+     a previous init, refresh the three scripts and the VERSION stamp.)
    - Install the hook: if the repo has no custom `core.hooksPath` and no existing
      `pre-push`, copy `${CLAUDE_PLUGIN_ROOT}/scripts/pre-push` to `.git/hooks/pre-push`
      and make it executable (`chmod +x`). If a custom `core.hooksPath` is set OR a

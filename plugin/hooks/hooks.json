@@ -30,6 +30,17 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/capture_check.sh\" --compact"
+          }
+        ]
+      }
     ]
   }
 }

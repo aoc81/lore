@@ -1,6 +1,6 @@
 ---
-description: Run the learnings freshness linter (file-ref check; --report drift; --index regen)
-argument-hint: "[--report | --index | --strict]"
+description: Run the learnings freshness linter (file-ref check; --report drift; --dupes; --index regen)
+argument-hint: "[--report | --dupes | --index | --strict]"
 allowed-tools: Bash
 ---
 
@@ -15,8 +15,10 @@ PY=$(command -v python3 || command -v python || command -v py)
 ```
 
 Modes: no args = file-reference existence check · `--report` = git drift triage
-(entries whose code changed since they were verified) · `--index` = regenerate the
-store README · `--strict` = exit non-zero on actionable issues (useful in CI).
+(entries whose code changed since they were verified) · `--dupes` = near-duplicate
+triage (entry pairs with overlapping title/tags, e.g. parallel captures from
+teammates, plus category-name variants) · `--index` = regenerate the store README ·
+`--strict` = exit non-zero on actionable issues (useful in CI).
 
 After running, briefly summarize what it found and suggest the next step (fix a path,
 mark an entry `superseded`, or run `/lore:sweep` to semantically re-verify).

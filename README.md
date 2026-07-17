@@ -93,24 +93,42 @@ caveats: **[codex/README.md](codex/README.md)**.
 **Recall (read).** On every prompt, a `UserPromptSubmit` hook tokenizes what you typed,
 matches it against each learning's `title` + `tags` (never the body), and injects the
 top few matches as paths + titles. The agent reads a file only if it's actually relevant.
+Matching is word-boundary, not substring — "auth" never matches "author" — with an
+entry-level score threshold so a single weak overlap never injects noise; short words
+(`ci`, `api`, `aws`) match against exact tags, where they're curated vocabulary.
 Superseded entries are down-ranked and tagged so they're never mistaken for live guidance,
 and each match carries cheap freshness flags (a deleted-file ref, or "verified N months
 ago") so a possibly-stale learning is never trusted blindly. A `PreToolUse` hook adds
 **edit-time recall**: when the agent is about to edit a file, any learning whose `files:`
-names that path surfaces right then — the gotcha shows up exactly when you touch the code.
+covers that path — exact, a directory prefix (`src/auth/`), or a glob (`src/auth/*.py`) —
+surfaces right then, so the gotcha shows up exactly when you touch the code. Every
+surfaced entry is also logged to `.git/lore-recall.log` (local only, inside `.git`,
+never committed) so `/lore:stats` can show which learnings actually get used.
+You can also query the same scorer by hand with `/lore:search <query>`.
 
 **Capture (write).** A `Stop` hook reminds the agent, at the end of a turn, to record a
-learning *only* if it's both non-obvious and reusable. The `lore` skill defines the gate,
+learning *only* if it's both non-obvious and reusable. By default the nudge is **smart**:
+purely conversational turns (no tool use at all) are skipped, so the check keeps its
+signal instead of becoming a mechanical reflex — configurable via `captureNudge` in
+`.lore.json` (`"always"`, `"smart"`, `"off"`). The `lore` skill defines the gate,
 the routing, and the file format. Before writing, it runs a deterministic overlap check
 (`recall.py --query`) so a new learning **updates** a related entry instead of duplicating
-it. You can also trigger capture with `/lore:capture`.
+it, and after writing it runs the secret scanner on the new file — a leak is caught at
+write time, with the pre-push hook as backstop. A `SessionStart` hook re-injects a short
+lore reminder right after **context compaction** — exactly the moment an uncaptured
+learning would otherwise die with the context. You can also trigger capture with
+`/lore:capture`.
 
 **Freshness.** Code changes; learnings shouldn't silently rot. `/lore:lint` checks
 that each entry's `files:` still exist; `--report` ranks entries whose referenced code
-changed since they were last `verified:` (your re-verify worklist); `--index` regenerates
-the store's README. `/lore:stats` prints a store-health snapshot (counts by status/category,
-the drift backlog, long-unverified entries, dangling links). The optional pre-push hook runs
-the existence check before every push.
+changed since they were last `verified:` (your re-verify worklist — computed in a single
+streaming `git log` pass, not one subprocess per file); `--dupes` finds near-duplicate
+entry pairs (e.g. two teammates capturing the same gotcha on parallel branches) and
+category-name variants; `--index` regenerates the store's README. `/lore:stats` prints a
+store-health snapshot (counts by status/category, the drift backlog, long-unverified
+entries, recall activity incl. never-surfaced entries, near-duplicate count, dangling
+links). The optional pre-push hook runs the existence check before every push, and the
+linter warns when the `.lore/` hook copies fall behind the installed plugin version.
 
 ## Commands
 
@@ -118,8 +136,9 @@ the existence check before every push.
 |---|---|
 | `/lore:init` | Scaffold the store in this project; optionally install the pre-push hook. |
 | `/lore:capture [note]` | Capture a learning from the current work (via the skill). |
-| `/lore:lint [--report\|--index\|--strict]` | Freshness linter: ref-check, drift triage, index regen. |
-| `/lore:stats` | Store-health snapshot: counts, drift backlog, stale-age, dangling links. |
+| `/lore:search <query>` | Search the store by title/tags — the same scorer the recall hook uses. |
+| `/lore:lint [--report\|--dupes\|--index\|--strict]` | Freshness linter: ref-check, drift triage, dupe triage, index regen. |
+| `/lore:stats` | Store-health snapshot: counts, drift backlog, recall activity, dupes, dangling links. |
 | `/lore:sweep [scope]` | Semantically re-verify drifted entries against the code and update them. |
 | `/lore:scan [path]` | Scan the store for committed secrets (the pre-push guard, run on demand). |
 
@@ -138,7 +157,7 @@ date: 2026-01-01
 track: knowledge        # or: bug
 category: ci
 tags: [ci, cache, lockfile]
-files: [.github/workflows/ci.yml]   # the linter checks these still exist
+files: [.github/workflows/ci.yml]   # exact path, dir prefix (src/auth/), or glob (src/*.py)
 status: current         # or: superseded / obsolete
 verified: 2026-01-01     # optional; bump after a re-verify to clear it from drift triage
 ---
@@ -160,12 +179,19 @@ Optional `.lore.json` in your project root:
   "storeDir": "learnings",
   "maxRecall": 5,
   "staleStatuses": ["superseded", "obsolete", "deprecated"],
-  "secretAllow": ["\\bAKIAEXAMPLE\\b"]
+  "secretAllow": ["\\bAKIAEXAMPLE\\b"],
+  "captureNudge": "smart"
 }
 ```
 
 `secretAllow` is a list of regexes; a match on a line suppresses secret-scan
 findings there (for genuine false positives or illustrative examples).
+
+`captureNudge` controls the end-of-turn capture nudge: `"smart"` (default —
+skip turns that used no tools at all), `"always"` (nudge every turn), or
+`"off"` (capture is manual via `/lore:capture`). Booleans work as shorthand:
+`true` = `"smart"`, `false` = `"off"`. Wrongly-typed config values are
+ignored rather than crashing a hook.
 
 ## Committed vs. private
 
@@ -196,8 +222,10 @@ machine is what *you* push — which is exactly what the secret scan guards.
 
 ## Customizing
 
-- **Quieter capture:** the end-of-turn nudge is the `Stop` hook in `plugin/hooks/hooks.json`.
-  Remove that block to make capture purely manual (`/lore:capture`).
+- **Quieter capture:** set `"captureNudge": "off"` in `.lore.json` (or `"always"` to
+  restore the pre-0.3 every-turn nudge). This is per-project and survives plugin
+  updates — don't edit the plugin's own `hooks.json`, that directory is an
+  ephemeral cache.
 - **Different store location/size:** use `.lore.json` (above).
 - **Recall tuning:** the stop-word list and scoring live in `plugin/scripts/recall.py`.
 

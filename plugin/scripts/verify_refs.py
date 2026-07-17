@@ -10,25 +10,48 @@ Modes:
               referenced files changed AFTER the entry's `verified:` (or `date:`)
               baseline, ranked by gap. Best candidates for a re-verify. Heuristic.
   --stats     Store-health summary -- counts by status/category, drift backlog,
-              entries unverified for a long time, and a soft dangling-link count.
+              entries unverified for a long time, recall activity (from the local
+              `.git/lore-recall.log`), near-duplicate count, and a soft
+              dangling-link count.
+  --dupes     Near-duplicate report -- entry pairs whose title+tags share enough
+              vocabulary to be merge candidates, plus category names that look
+              like variants of each other (ci vs CI vs build-ci).
   --index     Regenerate the store README index from entry frontmatter.
 
-Default/--report/--stats are read-only; --index rewrites the store README.
+Default/--report/--stats/--dupes are read-only; --index rewrites the store README.
 The `[[wiki-link]]` count in --stats is SOFT: a link with no target yet is an
 allowed forward-reference (a topic not captured yet), never an error.
+
+`files:` refs may be exact paths, directory prefixes (`src/auth/`), or globs
+(`src/auth/*.py`) -- all modes understand the three forms.
 """
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import find_project_dir, iter_entries, load_config  # noqa: E402
+from _common import (find_project_dir, iter_entries, load_config,  # noqa: E402
+                     norm_rel, ref_exists, ref_matches)
 
 # ~6 months; matches recall.py's freshness-flag threshold (STALE_AFTER_MONTHS).
 STALE_AFTER_DAYS = 183
+
+_WORD = re.compile(r"[a-z0-9_]+")
+_DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Words too generic to count as duplicate-signal on their own.
+_DUPE_STOP = {
+    "the", "and", "for", "with", "not", "use", "when", "how", "why", "fix",
+    "bug", "issue", "error", "problem",
+}
+_DUPE_MIN_SHARED = 3
+
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def _parse_date(s):
@@ -41,16 +64,53 @@ def _parse_date(s):
         return None
 
 
+# --- .lore/ hook-copy version check ------------------------------------------
+
+def plugin_version():
+    """The plugin's own version, when running from the plugin tree (else None)."""
+    manifest = SCRIPT_DIR.parent / ".claude-plugin" / "plugin.json"
+    try:
+        return json.loads(manifest.read_text(encoding="utf-8")).get("version")
+    except (OSError, ValueError):
+        return None
+
+
+def version_warning(project):
+    """Warn when the project's `.lore/` hook copies lag behind the plugin.
+
+    `/lore:init` copies the pre-push scripts into `<repo>/.lore/` and stamps
+    `.lore/VERSION`; those copies never auto-update. Returns a warning string
+    or None. Silent when either side is unknown (old installs, .lore copy runs).
+    """
+    plug = plugin_version()
+    stamp = Path(project) / ".lore" / "VERSION"
+    if not plug or not stamp.is_file():
+        return None
+    try:
+        local = stamp.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if local and local != plug:
+        return (f"note: .lore/ hook scripts are from lore {local}, plugin is "
+                f"{plug} -- re-run /lore:init to refresh the pre-push hook.")
+    return None
+
+
+# --- default mode: file-ref existence check ----------------------------------
+
 def cmd_check(entries, project, cfg, strict):
     stale_set = set(cfg["staleStatuses"])
     issues = []
     for e in entries:
         actionable = e["status"] not in stale_set
         for ref in e["files"]:
-            if not (project / ref).exists():
+            if ref and not ref_exists(project, ref):
                 issues.append((e, ref, actionable))
+    warn = version_warning(project)
     if not issues:
         print("OK  learnings: all entries have valid frontmatter file refs.")
+        if warn:
+            print(f"  {warn}")
         return 0
     actionable = [i for i in issues if i[2]]
     print(f"\nlearnings file-ref check: {len(issues)} issue(s), {len(actionable)} actionable:")
@@ -64,37 +124,112 @@ def cmd_check(entries, project, cfg, strict):
         print(f"    - referenced file no longer exists: {ref}{note}")
     print("\n  -> A 'current' entry with a missing file is likely STALE: fix the path,")
     print("     mark status: superseded, or re-verify the claim against the code.")
+    if warn:
+        print(f"  {warn}")
     return 1 if (strict and actionable) else 0
 
 
-def _git_last_change(project, relpath):
+# --- drift triage (git) ------------------------------------------------------
+
+_GIT_CHUNK = 150  # refs per git invocation (Windows command-length headroom)
+
+
+def _git_show_prefix(project):
     try:
         out = subprocess.run(
-            ["git", "-C", str(project), "log", "-1", "--format=%cs", "--", relpath],
+            ["git", "-C", str(project), "rev-parse", "--show-prefix"],
             capture_output=True, text=True, timeout=15,
-        ).stdout.strip()
+        )
+        if out.returncode != 0:
+            return None
+        return out.stdout.strip().replace("\\", "/")
     except (OSError, subprocess.SubprocessError):
         return None
-    return _parse_date(out)
+
+
+def _git_last_changes(project, refs):
+    """Last-commit date per `files:` ref, streaming ONE `git log` per chunk.
+
+    `git log --name-only` walks history newest-first, so the first commit whose
+    file list matches a ref gives that ref's most recent change; we stop as soon
+    as every ref is resolved. Refs may be paths, dir prefixes, or globs -- git
+    pathspecs narrow the walk and `ref_matches` does the exact attribution.
+    Returns {normalized_ref: date}.
+    """
+    want = [norm_rel(r) for r in dict.fromkeys(refs) if r]
+    if not want:
+        return {}
+    prefix = _git_show_prefix(project)
+    if prefix is None:
+        return {}
+    found = {}
+    for i in range(0, len(want), _GIT_CHUNK):
+        chunk = [r for r in want[i:i + _GIT_CHUNK] if r not in found]
+        if not chunk:
+            continue
+        args = (["git", "-C", str(project), "log", "--format=%cs",
+                 "--name-only", "--"] + chunk)
+        try:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL,
+                                    text=True, errors="replace")
+        except OSError:
+            return found
+        remaining = set(chunk)
+        cur = None
+        try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                if _DATE_LINE.match(line):
+                    cur = _parse_date(line)
+                    continue
+                path = line
+                if path.startswith('"') and path.endswith('"'):
+                    path = path[1:-1]  # git-quoted path; good enough here
+                if prefix and path.startswith(prefix):
+                    path = path[len(prefix):]
+                if cur is None:
+                    continue
+                for r in [r for r in remaining if ref_matches(r, path)]:
+                    found[r] = cur
+                    remaining.discard(r)
+                if not remaining:
+                    break
+        finally:
+            try:
+                proc.stdout.close()
+                proc.terminate()
+                proc.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+    return found
 
 
 def _drift_candidates(entries, project, stale_set):
     """Current entries whose referenced code changed after their baseline date.
 
-    Returns [(gap_days, entry, base_date, newest_date, newest_file), ...].
+    Returns [(gap_days, entry, base_date, newest_date, newest_ref), ...].
     """
-    cands = []
+    tracked, all_refs = [], set()
     for e in entries:
         if e["status"] in stale_set:
             continue
         base = _parse_date(e["verified"] or e["date"])
         if not base or not e["files"]:
             continue
+        refs = [r for r in e["files"] if r and ref_exists(project, r)]
+        if not refs:
+            continue
+        tracked.append((e, base, refs))
+        all_refs.update(norm_rel(r) for r in refs)
+    dates = _git_last_changes(project, all_refs)
+    cands = []
+    for e, base, refs in tracked:
         newest, newest_f = None, None
-        for ref in e["files"]:
-            if not (project / ref).exists():
-                continue
-            d = _git_last_change(project, ref)
+        for ref in refs:
+            d = dates.get(norm_rel(ref))
             if d and (newest is None or d > newest):
                 newest, newest_f = d, ref
         if newest and newest > base:
@@ -120,6 +255,64 @@ def cmd_report(entries, project, cfg):
     print("     frontmatter so they drop off this list until the code moves again.")
     return 0
 
+
+# --- near-duplicate detection ------------------------------------------------
+
+def _entry_tokens(e):
+    words = _WORD.findall((e["title"] + " " + " ".join(e["tags"])).lower())
+    return {w for w in words if len(w) >= 3 and w not in _DUPE_STOP}
+
+
+def _dupe_pairs(entries):
+    """Entry pairs sharing >= _DUPE_MIN_SHARED meaningful title/tag words."""
+    toks = [(e, _entry_tokens(e)) for e in entries]
+    pairs = []
+    for i in range(len(toks)):
+        for j in range(i + 1, len(toks)):
+            shared = toks[i][1] & toks[j][1]
+            if len(shared) >= _DUPE_MIN_SHARED:
+                pairs.append((len(shared), toks[i][0], toks[j][0],
+                              sorted(shared)))
+    pairs.sort(key=lambda p: -p[0])
+    return pairs
+
+
+def _category_variants(entries):
+    """Category names that normalize to the same key (ci vs CI vs build_ci)."""
+    groups = {}
+    for e in entries:
+        cat = e["category"]
+        key = re.sub(r"[-_\s]+", "", cat.lower())
+        groups.setdefault(key, set()).add(cat)
+    return sorted(v for v in groups.values() if len(v) > 1)
+
+
+def cmd_dupes(entries, project):
+    pairs = _dupe_pairs(entries)
+    print("Near-duplicate triage -- pairs sharing title/tag vocabulary (merge")
+    print("candidates; the capture-time overlap check only sees ONE machine, so")
+    print("parallel captures from teammates land here):")
+    if not pairs:
+        print("  none.")
+    for n, a, b, shared in pairs:
+        ra = a["path"].relative_to(project).as_posix()
+        rb = b["path"].relative_to(project).as_posix()
+        print(f"\n  {n} shared: {', '.join(shared)}")
+        print(f"    - {ra}")
+        print(f"    - {rb}")
+    variants = _category_variants(entries)
+    if variants:
+        print("\nCategory variants (same name, different spelling -- pick one):")
+        for group in variants:
+            print(f"  - {' / '.join(sorted(group))}")
+    if pairs or variants:
+        print("\n  -> Merge true duplicates into ONE entry (keep the better body,")
+        print("     union the tags), mark the loser superseded or delete it, then")
+        print("     regenerate the index (--index).")
+    return 0
+
+
+# --- stats -------------------------------------------------------------------
 
 def _age_days(stamp):
     d = _parse_date(stamp)
@@ -147,6 +340,31 @@ def _dangling_links(entries):
     return dangling
 
 
+def _recall_activity(entries, project):
+    """(top_surfaced, never_count) from `.git/lore-recall.log`, or None.
+
+    The log is written by the recall hook (local only, inside .git). Absent
+    log -> None (feature inactive or no git).
+    """
+    log = project / ".git" / "lore-recall.log"
+    if not log.is_file():
+        return None
+    counts = {}
+    try:
+        for line in log.read_text(encoding="utf-8",
+                                  errors="replace").splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                counts[parts[2]] = counts.get(parts[2], 0) + 1
+    except OSError:
+        return None
+    rels = {e["path"].relative_to(project).as_posix() for e in entries}
+    top = sorted(((n, p) for p, n in counts.items() if p in rels),
+                 reverse=True)[:3]
+    never = len(rels - set(counts))
+    return top, never
+
+
 def cmd_stats(entries, project, cfg, store):
     stale_set = set(cfg["staleStatuses"])
     by_status, by_cat = {}, {}
@@ -157,7 +375,7 @@ def cmd_stats(entries, project, cfg, store):
         by_status[st] = by_status.get(st, 0) + 1
         by_cat[e["category"]] = by_cat.get(e["category"], 0) + 1
         if e["status"] not in stale_set and any(
-                f and not (project / f).exists() for f in e["files"]):
+                f and not ref_exists(project, f) for f in e["files"]):
             deleted_refs += 1
         age = _age_days(e["verified"] or e["date"])
         if age is not None:
@@ -169,6 +387,7 @@ def cmd_stats(entries, project, cfg, store):
     drift = (len(_drift_candidates(entries, project, stale_set))
              if (project / ".git").exists() else None)
     dangling = _dangling_links(entries)
+    dupes = len(_dupe_pairs(entries))
 
     def counts(d):
         return " | ".join(f"{k} {v}" for k, v in
@@ -193,9 +412,25 @@ def cmd_stats(entries, project, cfg, store):
         rel = oldest[1]["path"].relative_to(project).as_posix()
         print(f"    oldest stamp: {rel}  (~{oldest[0] // 30}mo)")
     print("")
+    activity = _recall_activity(entries, project)
+    if activity is not None:
+        top, never = activity
+        print("  recall activity (local .git/lore-recall.log):")
+        for n, p in top:
+            print(f"    {n:4d}x  {p}")
+        tail = "   -> tags may not match how you prompt" if never else ""
+        print(f"    never surfaced: {never}{tail}")
+        print("")
+    tail = "   -> verify_refs.py --dupes" if dupes else ""
+    print(f"  near-duplicate pairs (title/tag overlap): {dupes}{tail}")
     print(f"  links: dangling [[refs]] (soft; forward-refs ok): {len(dangling)}")
+    warn = version_warning(project)
+    if warn:
+        print(f"\n  {warn}")
     return 0
 
+
+# --- index -------------------------------------------------------------------
 
 def cmd_index(entries, project, cfg, store):
     stale_set = set(cfg["staleStatuses"])
@@ -239,6 +474,7 @@ def main():
     ap = argparse.ArgumentParser(description="Lore — freshness tooling for the learnings store.")
     ap.add_argument("--report", action="store_true", help="git drift triage")
     ap.add_argument("--stats", action="store_true", help="store-health summary")
+    ap.add_argument("--dupes", action="store_true", help="near-duplicate triage")
     ap.add_argument("--index", action="store_true", help="regenerate store README")
     ap.add_argument("--strict", action="store_true", help="exit 1 on actionable issues")
     args = ap.parse_args()
@@ -254,6 +490,8 @@ def main():
         return cmd_index(entries, project, cfg, store)
     if args.stats:
         return cmd_stats(entries, project, cfg, store)
+    if args.dupes:
+        return cmd_dupes(entries, project)
     if args.report:
         return cmd_report(entries, project, cfg)
     return cmd_check(entries, project, cfg, args.strict)
