@@ -3,6 +3,7 @@ import fnmatch
 import json
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 DEFAULTS = {
@@ -11,9 +12,15 @@ DEFAULTS = {
     "staleStatuses": ["superseded", "obsolete", "deprecated"],
     "secretAllow": [],  # regexes whose match on a line suppresses secret-scan findings
     "captureNudge": "smart",  # always | smart (skip tool-less turns) | off
+    "staleAfterMonths": 6,  # freshness threshold, shared by recall + the linter
+    "stopWords": [],  # extra recall stop words, ADDED to the built-in list
 }
 
 _NUDGE_MODES = ("always", "smart", "off")
+
+# One month of the freshness threshold, in days (365.25 / 12): 6mo -> 183d, the
+# value verify_refs.py used to hardcode.
+_DAYS_PER_MONTH = 30.44
 
 
 def find_project_dir(data=None):
@@ -30,9 +37,9 @@ def _valid(key, value):
     """Type-check one `.lore.json` value; a bad type must never crash a hook."""
     if key == "storeDir":
         return isinstance(value, str) and bool(value.strip())
-    if key == "maxRecall":
+    if key in ("maxRecall", "staleAfterMonths"):
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
-    if key in ("staleStatuses", "secretAllow"):
+    if key in ("staleStatuses", "secretAllow", "stopWords"):
         return (isinstance(value, list)
                 and all(isinstance(x, str) for x in value))
     if key == "captureNudge":
@@ -60,6 +67,53 @@ def load_config(project):
     if isinstance(cfg["captureNudge"], bool):
         cfg["captureNudge"] = "smart" if cfg["captureNudge"] else "off"
     return cfg
+
+
+def config_issues(project):
+    """`(unknown_keys, invalid_keys)` in `.lore.json` -- for the linter to report.
+
+    `load_config` swallows both (a hook must never die on a hand-edited config),
+    which means a typo like `maxRecal` silently does nothing. This is where that
+    becomes visible; both lists are empty when the file is absent or unparseable.
+    """
+    f = Path(project) / ".lore.json"
+    if not f.is_file():
+        return [], []
+    try:
+        user = json.loads(f.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return [], []
+    if not isinstance(user, dict):
+        return [], []
+    unknown = sorted(k for k in user if k not in DEFAULTS)
+    invalid = sorted(k for k in user if k in DEFAULTS and not _valid(k, user[k]))
+    return unknown, invalid
+
+
+def stale_after_days(cfg):
+    """The freshness threshold in days (the linter's unit; recall uses months)."""
+    return int(round(cfg["staleAfterMonths"] * _DAYS_PER_MONTH))
+
+
+# --- text tokenizing (shared by recall and the dupe finder) ------------------
+# Unicode-aware and diacritic-folding on purpose: `[a-z0-9_]+` split accented
+# words ("autenticación" -> "autenticaci" + "n"), which quietly broke recall for
+# anyone prompting in a non-English language. Folding also lets a prompt written
+# with accents match tags written without them (a very common mix).
+
+WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def fold(text):
+    """Casefold and strip diacritics: 'Autenticación' -> 'autenticacion'."""
+    decomposed = unicodedata.normalize("NFKD", str(text))
+    return "".join(c for c in decomposed
+                   if not unicodedata.combining(c)).casefold()
+
+
+def words(text):
+    """Diacritic-folded word tokens of `text` (accented words stay whole)."""
+    return WORD_RE.findall(fold(text))
 
 
 def _unquote(s):
@@ -105,6 +159,34 @@ def parse_frontmatter(text):
     return fm
 
 
+# Only the frontmatter is ever needed here, and this runs on every prompt and
+# every edit -- so read a bounded head instead of whole entries. 8 KB spans any
+# realistic frontmatter block; the rare entry that overflows it pays a full read.
+_FM_HEAD_CHARS = 8192
+
+
+def read_frontmatter(path):
+    """Frontmatter dict of one entry, read from a bounded head of the file.
+
+    Returns None when the file can't be read at all. An unterminated head (a
+    frontmatter block longer than the window) falls back to a full read, so
+    correctness never depends on the window size.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(_FM_HEAD_CHARS)
+    except OSError:
+        return None
+    fm = parse_frontmatter(head)
+    if fm or not head.startswith("---") or len(head) < _FM_HEAD_CHARS:
+        return fm
+    try:
+        return parse_frontmatter(
+            Path(path).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+
+
 def iter_entries(store):
     """Yield a normalized dict per learning file under `store`.
 
@@ -115,11 +197,9 @@ def iter_entries(store):
     for p in sorted(store.rglob("*.md")):
         if p.name.lower() == "readme.md" or p.name[:1] in ("_", "."):
             continue
-        try:
-            text = p.read_text(encoding="utf-8")
-        except OSError:
+        fm = read_frontmatter(p)
+        if fm is None:
             continue
-        fm = parse_frontmatter(text)
         tags = fm.get("tags") or []
         if isinstance(tags, str):
             tags = [tags]

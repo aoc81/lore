@@ -74,8 +74,8 @@ Uninstall: `python3 codex/install.py --uninstall` (leaves your stores and the
 - **No `/lore:*` slash commands.** Codex custom prompts are user-local and can't be
   namespaced/shared, so the Claude commands map to: install script (`init`), the
   `lore` skill + Stop hook (`capture`), and direct `verify_refs.py` calls (`lint`).
-- **Config/paths:** `.lore.json`, `staleStatuses`, and the `learnings/` layout are
-  identical to the Claude target — the [shared core](../plugin/scripts/) is the same code.
+- **Config/paths:** `.lore.json` (`staleStatuses`, `staleAfterMonths`, `stopWords`, …)
+  and the `learnings/` layout are identical to the Claude target — the [shared core](../plugin/scripts/) is the same code.
 
 ## What's shared vs Codex-specific
 

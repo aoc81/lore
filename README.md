@@ -96,12 +96,18 @@ top few matches as paths + titles. The agent reads a file only if it's actually 
 Matching is word-boundary, not substring — "auth" never matches "author" — with an
 entry-level score threshold so a single weak overlap never injects noise; short words
 (`ci`, `api`, `aws`) match against exact tags, where they're curated vocabulary.
+Tokenizing is Unicode and accent-folding, so a prompt in Spanish (or any accented
+language) tokenizes correctly and "autenticación" matches a tag written `autenticacion`;
+common English **and** Spanish filler words are ignored, and you can add your own with
+`stopWords` in `.lore.json`.
 Superseded entries are down-ranked and tagged so they're never mistaken for live guidance,
 and each match carries cheap freshness flags (a deleted-file ref, or "verified N months
 ago") so a possibly-stale learning is never trusted blindly. A `PreToolUse` hook adds
 **edit-time recall**: when the agent is about to edit a file, any learning whose `files:`
 covers that path — exact, a directory prefix (`src/auth/`), or a glob (`src/auth/*.py`) —
-surfaces right then, so the gotcha shows up exactly when you touch the code. Every
+surfaces right then, so the gotcha shows up exactly when you touch the code (live entries
+ahead of superseded ones, and each entry only **once per session**, so a ten-edit refactor
+doesn't re-inject the same context ten times). Every
 surfaced entry is also logged to `.git/lore-recall.log` (local only, inside `.git`,
 never committed) so `/lore:stats` can show which learnings actually get used.
 You can also query the same scorer by hand with `/lore:search <query>`.
@@ -128,7 +134,8 @@ category-name variants; `--index` regenerates the store's README. `/lore:stats` 
 store-health snapshot (counts by status/category, the drift backlog, long-unverified
 entries, recall activity incl. never-surfaced entries, near-duplicate count, dangling
 links). The optional pre-push hook runs the existence check before every push, and the
-linter warns when the `.lore/` hook copies fall behind the installed plugin version.
+linter warns when the `.lore/` hook copies fall behind the installed plugin version — or
+when `.lore.json` has a key the hooks are silently ignoring (a typo like `maxRecal`).
 
 ## Commands
 
@@ -168,7 +175,9 @@ Body — **knowledge**: Context · Guidance · Why This Matters · When To Apply
 
 **Authoring for low drift:** reference code by stable symbol (function/class), not line
 numbers; keep `files:` complete (it's the linter's surface); make tags the words a
-future prompt would use.
+future prompt would use — **in the language you actually prompt in** (recall folds
+accents, so `autenticación` and `autenticacion` match either way, but a Spanish prompt
+still won't match an English tag).
 
 ## Configuration
 
@@ -179,10 +188,22 @@ Optional `.lore.json` in your project root:
   "storeDir": "learnings",
   "maxRecall": 5,
   "staleStatuses": ["superseded", "obsolete", "deprecated"],
+  "staleAfterMonths": 6,
+  "stopWords": ["widget", "todo"],
   "secretAllow": ["\\bAKIAEXAMPLE\\b"],
   "captureNudge": "smart"
 }
 ```
+
+`staleStatuses` are the `status:` values treated as not-live: they're down-ranked in
+prompt recall, sorted last in edit-time recall, tagged `[SUPERSEDED]` when surfaced,
+and exempt from the linter's actionable issues.
+
+`staleAfterMonths` is the single freshness threshold, used both by recall's
+"verified N months ago" flag and by the linter's long-unverified count.
+
+`stopWords` are **added to** the built-in stop list (English + Spanish fillers) — use it
+for words that are noise in your domain, e.g. a product name that appears in every prompt.
 
 `secretAllow` is a list of regexes; a match on a line suppresses secret-scan
 findings there (for genuine false positives or illustrative examples).
@@ -191,7 +212,8 @@ findings there (for genuine false positives or illustrative examples).
 skip turns that used no tools at all), `"always"` (nudge every turn), or
 `"off"` (capture is manual via `/lore:capture`). Booleans work as shorthand:
 `true` = `"smart"`, `false` = `"off"`. Wrongly-typed config values are
-ignored rather than crashing a hook.
+ignored rather than crashing a hook — run `/lore:lint` to see which keys are
+being ignored and why.
 
 ## Committed vs. private
 
@@ -211,7 +233,9 @@ is effectively **published the moment it's written**. The plugin is built around
   the line, a `secretAllow` regex, `LORE_SCAN_BLOCK=0`, or `git push --no-verify`.
 - **Recall never echoes bodies.** The recall hook matches only `title` + `tags` and emits
   only paths + titles — store content is never auto-injected verbatim, which limits the
-  prompt-injection surface of a shared/poisoned store.
+  prompt-injection surface of a shared/poisoned store. The titles it does inject are
+  capped at 140 characters and stripped of control characters, so a `title:` in a
+  teammate's PR can't smuggle in an instruction payload either.
 - **Hooks run code on every turn.** Recall and capture execute local Python on each prompt
   and turn-end. Review the scripts before trusting them; on Codex, approve them via `/hooks`.
 - **Pin the plugin.** Install a reviewed tag/commit rather than floating on `main`, so you
@@ -227,7 +251,9 @@ machine is what *you* push — which is exactly what the secret scan guards.
   updates — don't edit the plugin's own `hooks.json`, that directory is an
   ephemeral cache.
 - **Different store location/size:** use `.lore.json` (above).
-- **Recall tuning:** the stop-word list and scoring live in `plugin/scripts/recall.py`.
+- **Recall tuning:** add noise words with `stopWords` in `.lore.json` (per-project,
+  survives plugin updates); the built-in list and the scoring itself live in
+  `plugin/scripts/recall.py`.
 
 ## How it's built
 

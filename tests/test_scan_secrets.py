@@ -48,6 +48,15 @@ class TestScanFile(unittest.TestCase):
         found = _scan("-----BEGIN RSA PRIVATE KEY-----")
         self.assertEqual(found[0][1], "Private key block")
 
+    def test_anthropic_key_reported_once(self):
+        fake = "sk-ant-" + "E" * 24  # synthetic, matches the shape only
+        found = _scan(f"key {fake} leaked")
+        self.assertEqual([f[1] for f in found], ["Anthropic key"])
+
+    def test_openai_key_still_flagged(self):
+        fake = "sk-proj-" + "F" * 24
+        self.assertEqual([f[1] for f in _scan(f"key {fake}")], ["OpenAI key"])
+
 
 if __name__ == "__main__":
     unittest.main()

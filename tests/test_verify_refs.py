@@ -1,13 +1,15 @@
-"""Tests for verify_refs.py: dates, dupes, versions, git drift (integration)."""
+"""Tests for verify_refs.py: dates, dupes, config, index, git drift."""
+import contextlib
+import io
 import shutil
 import subprocess
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import _util  # noqa: F401
-from _common import iter_entries
+from _common import DEFAULTS, iter_entries
 from _util import write_entry
 import verify_refs
 
@@ -74,6 +76,69 @@ class TestVersionWarning(unittest.TestCase):
             (proj / ".lore" / "VERSION").write_text("0.0.1", encoding="utf-8")
             self.assertIn("re-run /lore:init",
                           verify_refs.version_warning(proj))
+
+
+class TestConfigWarning(unittest.TestCase):
+    def _warn(self, payload):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        Path(td.name, ".lore.json").write_text(payload, encoding="utf-8")
+        return verify_refs.config_warning(Path(td.name))
+
+    def test_typo_gets_a_suggestion(self):
+        warn = self._warn('{"maxRecal": 3}')
+        self.assertIn("unknown key 'maxRecal'", warn)
+        self.assertIn("did you mean 'maxRecall'", warn)
+
+    def test_invalid_value_reported(self):
+        self.assertIn("'maxRecall' has an invalid value",
+                      self._warn('{"maxRecall": "5"}'))
+
+    def test_silent_when_clean(self):
+        self.assertIsNone(self._warn('{"maxRecall": 5}'))
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(verify_refs.config_warning(Path(td)))
+
+
+class TestIndex(unittest.TestCase):
+    def test_writes_grouped_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            write_entry(store, "ci/cache.md", title="Cache key")
+            write_entry(store, "ci/old.md", title="Old way",
+                        status="superseded")
+            write_entry(store, "api/pager.md", title="Pagination")
+            entries = list(iter_entries(store))
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = verify_refs.cmd_index(entries, proj, dict(DEFAULTS), store)
+            text = (store / "README.md").read_text(encoding="utf-8")
+            # the regenerated README must not become an entry itself
+            self.assertEqual(len(list(iter_entries(store))), 3)
+        self.assertEqual(rc, 0)
+        self.assertIn("## Index (3 entries)", text)
+        self.assertIn("### ci (2)", text)
+        self.assertIn("[Cache key](ci/cache.md)", text)
+        self.assertIn("[Old way](ci/old.md) - **[SUPERSEDED]**", text)
+
+
+class TestStatsThreshold(unittest.TestCase):
+    def test_unverified_count_follows_staleAfterMonths(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            old = (date.today() - timedelta(days=100)).isoformat()
+            write_entry(store, "a/e.md", title="E", date=old)
+            entries = list(iter_entries(store))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                verify_refs.cmd_stats(entries, proj, dict(DEFAULTS), store)
+            self.assertIn("not verified in >6mo: 0", out.getvalue())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                verify_refs.cmd_stats(entries, proj,
+                                      dict(DEFAULTS, staleAfterMonths=2), store)
+            self.assertIn("not verified in >2mo: 1", out.getvalue())
 
 
 class TestRecallActivity(unittest.TestCase):

@@ -6,8 +6,10 @@ import unittest
 from pathlib import Path
 
 import _util  # noqa: F401  (puts plugin/scripts on sys.path)
-from _common import (DEFAULTS, iter_entries, load_config, norm_rel,
-                     parse_frontmatter, ref_exists, ref_matches)
+from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues, fold,
+                     iter_entries, load_config, norm_rel, parse_frontmatter,
+                     read_frontmatter, ref_exists, ref_matches,
+                     stale_after_days, words)
 from _util import write_entry
 
 
@@ -69,6 +71,49 @@ class TestLoadConfig(unittest.TestCase):
             self.assertEqual(load_config(td)["maxRecall"],
                              DEFAULTS["maxRecall"])
 
+    def test_new_keys_validate(self):
+        cfg = self._cfg({"staleAfterMonths": 12, "stopWords": ["widget"]})
+        self.assertEqual(cfg["staleAfterMonths"], 12)
+        self.assertEqual(cfg["stopWords"], ["widget"])
+        bad = self._cfg({"staleAfterMonths": 0, "stopWords": "widget"})
+        self.assertEqual(bad["staleAfterMonths"], 6)
+        self.assertEqual(bad["stopWords"], [])
+
+    def test_stale_after_days(self):
+        self.assertEqual(stale_after_days(DEFAULTS), 183)  # the old constant
+        self.assertEqual(stale_after_days(dict(DEFAULTS, staleAfterMonths=12)),
+                         365)
+
+
+class TestConfigIssues(unittest.TestCase):
+    def _issues(self, payload):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, ".lore.json").write_text(json.dumps(payload),
+                                              encoding="utf-8")
+            return config_issues(td)
+
+    def test_reports_unknown_and_invalid_keys(self):
+        unknown, invalid = self._issues({"maxRecal": 3, "storeDir": 7,
+                                         "maxRecall": 4})
+        self.assertEqual(unknown, ["maxRecal"])
+        self.assertEqual(invalid, ["storeDir"])
+
+    def test_clean_config_and_missing_file(self):
+        self.assertEqual(self._issues({"maxRecall": 4}), ([], []))
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(config_issues(td), ([], []))
+
+
+class TestTokenizing(unittest.TestCase):
+    def test_accented_words_stay_whole_and_fold(self):
+        self.assertEqual(words("autenticación"), ["autenticacion"])
+        self.assertEqual(words("Año Español"), ["ano", "espanol"])
+        self.assertEqual(fold("Título"), "titulo")
+
+    def test_ascii_behavior_is_unchanged(self):
+        self.assertEqual(words("Cache_key includes lockfile v2"),
+                         ["cache_key", "includes", "lockfile", "v2"])
+
 
 class TestIterEntries(unittest.TestCase):
     def test_skips_readme_templates_and_dotfiles(self):
@@ -87,6 +132,35 @@ class TestIterEntries(unittest.TestCase):
         by_name = {e["path"].name: e for e in entries}
         self.assertEqual(by_name["pager.md"]["title"], "pager")
         self.assertEqual(by_name["cache.md"]["category"], "ci")
+
+
+class TestReadFrontmatter(unittest.TestCase):
+    """Only the head of an entry is read -- bodies never reach the hooks."""
+
+    def _entry(self, body):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        p = Path(td.name) / "e.md"
+        p.write_text('---\ntitle: "T"\ntags: [a]\n---\n' + body,
+                     encoding="utf-8")
+        return p
+
+    def test_huge_body_is_not_read(self):
+        p = self._entry("x" * (_FM_HEAD_CHARS * 4))
+        self.assertEqual(read_frontmatter(p)["title"], "T")
+
+    def test_frontmatter_longer_than_the_head_still_parses(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        p = Path(td.name) / "e.md"
+        padding = "".join(f"pad{i}: x\n" for i in range(_FM_HEAD_CHARS // 4))
+        p.write_text(f'---\n{padding}title: "Late"\n---\nbody\n',
+                     encoding="utf-8")
+        self.assertGreater(p.stat().st_size, _FM_HEAD_CHARS)
+        self.assertEqual(read_frontmatter(p)["title"], "Late")
+
+    def test_missing_file(self):
+        self.assertIsNone(read_frontmatter(Path("does-not-exist.md")))
 
 
 class TestRefMatching(unittest.TestCase):

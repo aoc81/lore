@@ -5,7 +5,9 @@ Modes:
   (default)   Existence check -- flag entries whose frontmatter `files:` paths no
               longer exist. `--strict` exits 1 on ACTIONABLE issues (a missing
               file on a non-stale entry; missing files on superseded entries are
-              expected/informational).
+              expected/informational). Also reports `.lore.json` keys the hooks
+              silently ignore (a typo like `maxRecal`), which is invisible at
+              hook time by design.
   --report    Drift triage -- for each current entry, use `git log` to find
               referenced files changed AFTER the entry's `verified:` (or `date:`)
               baseline, ranked by gap. Best candidates for a re-verify. Heuristic.
@@ -26,6 +28,7 @@ allowed forward-reference (a topic not captured yet), never an error.
 (`src/auth/*.py`) -- all modes understand the three forms.
 """
 import argparse
+import difflib
 import json
 import os
 import re
@@ -35,13 +38,10 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (find_project_dir, iter_entries, load_config,  # noqa: E402
-                     norm_rel, ref_exists, ref_matches)
+from _common import (DEFAULTS, config_issues, find_project_dir,  # noqa: E402
+                     iter_entries, load_config, norm_rel, ref_exists,
+                     ref_matches, stale_after_days, words)
 
-# ~6 months; matches recall.py's freshness-flag threshold (STALE_AFTER_MONTHS).
-STALE_AFTER_DAYS = 183
-
-_WORD = re.compile(r"[a-z0-9_]+")
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Words too generic to count as duplicate-signal on their own.
@@ -96,6 +96,26 @@ def version_warning(project):
     return None
 
 
+def config_warning(project):
+    """Warn about `.lore.json` keys the hooks silently ignore, or None.
+
+    A typo (`maxRecal`) or a wrong type reads as "my setting does nothing" with
+    no explanation, because `load_config` deliberately never fails. The linter
+    is where that surfaces.
+    """
+    unknown, invalid = config_issues(project)
+    if not unknown and not invalid:
+        return None
+    bits = []
+    for k in unknown:
+        near = difflib.get_close_matches(k, DEFAULTS, n=1, cutoff=0.7)
+        hint = f" (did you mean '{near[0]}'?)" if near else ""
+        bits.append(f"unknown key '{k}'{hint}")
+    for k in invalid:
+        bits.append(f"'{k}' has an invalid value (default kept)")
+    return "note: .lore.json -- ignored: " + "; ".join(bits) + "."
+
+
 # --- default mode: file-ref existence check ----------------------------------
 
 def cmd_check(entries, project, cfg, strict):
@@ -106,11 +126,11 @@ def cmd_check(entries, project, cfg, strict):
         for ref in e["files"]:
             if ref and not ref_exists(project, ref):
                 issues.append((e, ref, actionable))
-    warn = version_warning(project)
+    notes = [n for n in (config_warning(project), version_warning(project)) if n]
     if not issues:
         print("OK  learnings: all entries have valid frontmatter file refs.")
-        if warn:
-            print(f"  {warn}")
+        for n in notes:
+            print(f"  {n}")
         return 0
     actionable = [i for i in issues if i[2]]
     print(f"\nlearnings file-ref check: {len(issues)} issue(s), {len(actionable)} actionable:")
@@ -124,8 +144,8 @@ def cmd_check(entries, project, cfg, strict):
         print(f"    - referenced file no longer exists: {ref}{note}")
     print("\n  -> A 'current' entry with a missing file is likely STALE: fix the path,")
     print("     mark status: superseded, or re-verify the claim against the code.")
-    if warn:
-        print(f"  {warn}")
+    for n in notes:
+        print(f"  {n}")
     return 1 if (strict and actionable) else 0
 
 
@@ -259,8 +279,8 @@ def cmd_report(entries, project, cfg):
 # --- near-duplicate detection ------------------------------------------------
 
 def _entry_tokens(e):
-    words = _WORD.findall((e["title"] + " " + " ".join(e["tags"])).lower())
-    return {w for w in words if len(w) >= 3 and w not in _DUPE_STOP}
+    toks = words(e["title"] + " " + " ".join(e["tags"]))
+    return {w for w in toks if len(w) >= 3 and w not in _DUPE_STOP}
 
 
 def _dupe_pairs(entries):
@@ -367,6 +387,7 @@ def _recall_activity(entries, project):
 
 def cmd_stats(entries, project, cfg, store):
     stale_set = set(cfg["staleStatuses"])
+    stale_days = stale_after_days(cfg)
     by_status, by_cat = {}, {}
     deleted_refs = unverified_old = 0
     oldest = None
@@ -379,7 +400,7 @@ def cmd_stats(entries, project, cfg, store):
             deleted_refs += 1
         age = _age_days(e["verified"] or e["date"])
         if age is not None:
-            if age >= STALE_AFTER_DAYS:
+            if age >= stale_days:
                 unverified_old += 1
             if oldest is None or age > oldest[0]:
                 oldest = (age, e)
@@ -393,7 +414,7 @@ def cmd_stats(entries, project, cfg, store):
         return " | ".join(f"{k} {v}" for k, v in
                           sorted(d.items(), key=lambda kv: (-kv[1], kv[0])))
 
-    months = STALE_AFTER_DAYS // 30
+    months = cfg["staleAfterMonths"]
     print(f"Lore store health  ({store.relative_to(project).as_posix()})")
     print(f"  entries: {len(entries)}")
     print(f"  by status:    {counts(by_status)}")
@@ -424,9 +445,9 @@ def cmd_stats(entries, project, cfg, store):
     tail = "   -> verify_refs.py --dupes" if dupes else ""
     print(f"  near-duplicate pairs (title/tag overlap): {dupes}{tail}")
     print(f"  links: dangling [[refs]] (soft; forward-refs ok): {len(dangling)}")
-    warn = version_warning(project)
-    if warn:
-        print(f"\n  {warn}")
+    for n in (config_warning(project), version_warning(project)):
+        if n:
+            print(f"\n  {n}")
     return 0
 
 

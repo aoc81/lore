@@ -94,7 +94,8 @@ title: <short, specific>
 date: YYYY-MM-DD          # today, absolute
 track: bug | knowledge
 category: <free-form, e.g. build, ci, api, frontend, infra>
-tags: [k1, k2, k3]        # recall matches the prompt against title + tags — use words a future prompt would
+tags: [k1, k2, k3]        # recall matches the prompt against title + tags — use words a future prompt would,
+                          # written in the language you prompt in (accents are folded, languages are not)
 files: [path/to/code.ext] # the code this is about; the linter checks these still exist.
                           # A ref may be an exact path, a directory prefix (src/auth/),
                           # or a glob (src/auth/*.py) — dir/glob refs also power

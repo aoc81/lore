@@ -42,7 +42,9 @@ _RULES = [
     ("Slack webhook", r"https://hooks\.slack\.com/services/[A-Za-z0-9/_+\-]+"),
     ("Google API key", r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     ("Stripe live key", r"\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b"),
-    ("OpenAI key", r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,}\b"),
+    # `(?!ant-)` keeps an Anthropic key from also matching here and being
+    # reported twice under two vendor names.
+    ("OpenAI key", r"\bsk-(?!ant-)(?:proj-)?[A-Za-z0-9_\-]{20,}\b"),
     ("Anthropic key", r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b"),
     ("Twilio key", r"\bSK[0-9a-fA-F]{32}\b"),
     ("Sendgrid key", r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"),
