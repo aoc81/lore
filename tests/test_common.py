@@ -7,9 +7,10 @@ from pathlib import Path
 
 import _util  # noqa: F401  (puts plugin/scripts on sys.path)
 from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues, fold,
-                     iter_entries, load_config, norm_rel, parse_frontmatter,
-                     read_frontmatter, ref_exists, ref_matches,
-                     stale_after_days, words)
+                     is_under, iter_entries, iter_store_entries, load_config,
+                     norm_rel, parse_frontmatter, personal_store,
+                     read_frontmatter, ref_exists, ref_matches, rel_path,
+                     stale_after_days, store_dirs, words)
 from _util import write_entry
 
 
@@ -78,6 +79,16 @@ class TestLoadConfig(unittest.TestCase):
         bad = self._cfg({"staleAfterMonths": 0, "stopWords": "widget"})
         self.assertEqual(bad["staleAfterMonths"], 6)
         self.assertEqual(bad["stopWords"], [])
+
+    def test_personal_store_dir_accepts_empty_string(self):
+        # "" is the documented off switch, so it must NOT be treated as invalid
+        # (unlike storeDir, where empty would mean "the project root").
+        cfg = self._cfg({"personalStoreDir": "~/.lore/learnings"})
+        self.assertEqual(cfg["personalStoreDir"], "~/.lore/learnings")
+        self.assertEqual(self._cfg({"personalStoreDir": ""})
+                         ["personalStoreDir"], "")
+        self.assertEqual(self._cfg({"personalStoreDir": 7})
+                         ["personalStoreDir"], "")
 
     def test_stale_after_days(self):
         self.assertEqual(stale_after_days(DEFAULTS), 183)  # the old constant
@@ -192,6 +203,97 @@ class TestRefMatching(unittest.TestCase):
             self.assertTrue(ref_exists(proj, "sub/*.md"))
             self.assertFalse(ref_exists(proj, "sub/*.py"))
             self.assertTrue(ref_exists(proj, ""))  # noise, not staleness
+
+
+class TestPersonalStore(unittest.TestCase):
+    """The private second store: resolution rules and the redundancy guard."""
+
+    def _cfg(self, personal, store="learnings"):
+        cfg = dict(DEFAULTS)
+        cfg["storeDir"] = store
+        cfg["personalStoreDir"] = personal
+        return cfg
+
+    def test_unset_means_off(self):
+        self.assertIsNone(personal_store("/proj", self._cfg("")))
+        self.assertIsNone(personal_store("/proj", dict(DEFAULTS)))
+
+    def test_relative_resolves_under_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            got = personal_store(td, self._cfg(".lore/personal"))
+            self.assertEqual(got, Path(td) / ".lore" / "personal")
+
+    def test_tilde_expands_to_home(self):
+        got = personal_store("/proj", self._cfg("~/.lore/learnings"))
+        self.assertEqual(got, Path.home() / ".lore" / "learnings")
+
+    def test_absolute_is_kept(self):
+        absolute = Path(tempfile.gettempdir()).resolve() / "lore-personal"
+        got = personal_store("/proj", self._cfg(str(absolute)))
+        self.assertEqual(got, absolute)
+
+    def test_inside_team_store_is_refused(self):
+        # It would be found twice AND committed -- the opposite of private.
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(
+                personal_store(td, self._cfg("learnings/private")))
+            self.assertIsNone(personal_store(td, self._cfg("learnings")))
+
+    def test_store_dirs_order_and_flags(self):
+        with tempfile.TemporaryDirectory() as td:
+            stores = store_dirs(td, self._cfg("personal"))
+        self.assertEqual([flag for _s, flag in stores], [False, True])
+        self.assertEqual(stores[0][0].name, "learnings")
+        self.assertEqual(stores[1][0].name, "personal")
+
+    def test_store_dirs_team_only_when_unset(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(len(store_dirs(td, dict(DEFAULTS))), 1)
+
+
+class TestIterStoreEntries(unittest.TestCase):
+    def test_both_stores_team_first_and_flagged(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            write_entry(proj / "learnings", "a/team.md", title="Team")
+            write_entry(proj / "personal", "b/mine.md", title="Mine")
+            cfg = dict(DEFAULTS, personalStoreDir="personal")
+            entries = list(iter_store_entries(store_dirs(proj, cfg)))
+        self.assertEqual([e["title"] for e in entries], ["Team", "Mine"])
+        self.assertEqual([e["personal"] for e in entries], [False, True])
+
+    def test_missing_personal_store_is_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            write_entry(proj / "learnings", "a/team.md", title="Team")
+            cfg = dict(DEFAULTS, personalStoreDir="nope")
+            entries = list(iter_store_entries(store_dirs(proj, cfg)))
+        self.assertEqual([e["title"] for e in entries], ["Team"])
+
+    def test_single_path_arg_still_works(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = Path(td) / "learnings"
+            write_entry(store, "a/e.md", title="E")
+            entries = list(iter_store_entries(store))
+        self.assertEqual([(e["title"], e["personal"]) for e in entries],
+                         [("E", False)])
+
+
+class TestRelPathAndIsUnder(unittest.TestCase):
+    def test_inside_is_relative_outside_is_absolute(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            self.assertEqual(rel_path(proj, proj / "learnings" / "a.md"),
+                             "learnings/a.md")
+            outside = Path(td).parent / "elsewhere" / "b.md"
+            self.assertEqual(rel_path(proj, outside), outside.as_posix())
+
+    def test_is_under(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            self.assertTrue(is_under(proj, proj / "a" / "b.md"))
+            self.assertTrue(is_under(proj, proj))
+            self.assertFalse(is_under(proj / "a", proj / "b" / "c.md"))
 
 
 if __name__ == "__main__":

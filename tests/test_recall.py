@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -207,8 +208,7 @@ class TestFormatEntry(StoreCase):
 
 class TestLogRecall(StoreCase):
     def _entry(self):
-        p = write_entry(self.store, "a/e.md", title="E")
-        return {"path": p}
+        return write_entry(self.store, "a/e.md", title="E")
 
     def test_writes_only_with_git_dir(self):
         e = self._entry()
@@ -234,6 +234,195 @@ class TestLogRecall(StoreCase):
         lines = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), recall._LOG_KEEP_LINES + 1)
         self.assertIn("learnings/a/e.md", lines[-1])
+
+
+class TestPersonalStoreRecall(StoreCase):
+    """Recall reads the private store too -- flagged, never mixed up."""
+
+    def setUp(self):
+        super().setUp()
+        self.personal = self.project / "private"
+        self.cfg = dict(DEFAULTS, personalStoreDir="private")
+        self.stores = [(self.store, False), (self.personal, True)]
+
+    def test_personal_entry_surfaces_flagged(self):
+        write_entry(self.personal, "prefs/diffs.md",
+                    title="Show the diff before committing",
+                    tags=("diff", "commit", "preference"))
+        m = recall.rank_matches("about to commit, show me the diff",
+                                self.stores, self.cfg)
+        self.assertEqual(self.titles(m), ["Show the diff before committing"])
+        line = recall._format_entry(m[0][1], m[0][0], self.project, self.cfg)
+        self.assertIn("[personal]", line)
+
+    def test_team_entry_is_not_flagged_personal(self):
+        write_entry(self.store, "ci/cache.md",
+                    title="Cache key includes lockfile", tags=("cache",))
+        m = recall.rank_matches("cache", self.stores, self.cfg)
+        line = recall._format_entry(m[0][1], m[0][0], self.project, self.cfg)
+        self.assertNotIn("personal", line)
+
+    def test_both_stores_ranked_together(self):
+        write_entry(self.store, "ci/cache.md", title="Cache key lockfile hash",
+                    tags=("cache",))
+        write_entry(self.personal, "prefs/cache.md", title="Cache preference",
+                    tags=("cache",))
+        m = recall.rank_matches("cache", self.stores, self.cfg)
+        self.assertEqual(len(m), 2)
+
+    def test_outside_project_entry_skips_deleted_ref_flag(self):
+        # A personal store in ~ may name another repo's files; resolving them
+        # against THIS project would flag every entry as stale.
+        outside = Path(self._td.name).parent / ("lore-outside-%d" % id(self))
+        outside.mkdir()
+        self.addCleanup(shutil.rmtree, outside, True)
+        p = write_entry(outside, "e.md", title="Outside", files=("src/gone.py",))
+        entries = list(recall.iter_store_entries([(outside, True)]))
+        self.assertEqual(entries[0]["path"], p)
+        self.assertEqual(
+            recall.freshness_flags(entries[0], self.project, self.cfg), [])
+        # the same entry INSIDE the project is still ref-checked
+        inside = dict(entries[0], path=write_entry(
+            self.personal, "e.md", title="Inside", files=("src/gone.py",)))
+        self.assertIn("! refs a deleted file",
+                      recall.freshness_flags(inside, self.project, self.cfg))
+
+    def test_hook_reads_personal_store_via_config(self):
+        write_entry(self.personal, "prefs/tests.md",
+                    title="Run the tests before reporting done",
+                    tags=("tests", "workflow"))
+        (self.project / ".lore.json").write_text(
+            json.dumps({"personalStoreDir": "private"}), encoding="utf-8")
+        (self.project / ".git").mkdir()
+        ctx = self.context_of(self.run_hook(
+            {"cwd": str(self.project),
+             "prompt": "what is my workflow for tests?"}))
+        self.assertIn("Run the tests before reporting done", ctx)
+        self.assertIn("[personal]", ctx)
+
+
+class TestEditTargets(unittest.TestCase):
+    """Claude passes file_path; Codex passes an apply_patch envelope."""
+
+    def test_direct_file_path(self):
+        self.assertEqual(
+            recall.edit_targets({"tool_input": {"file_path": "src/a.py"}}),
+            ["src/a.py"])
+        self.assertEqual(
+            recall.edit_targets({"tool_input": {"notebook_path": "n.ipynb"}}),
+            ["n.ipynb"])
+
+    def test_apply_patch_envelope(self):
+        cmd = "\n".join([
+            "apply_patch <<'PATCH'",
+            "*** Begin Patch",
+            "*** Update File: src/auth/session.py",
+            "@@ def login",
+            "-old",
+            "+new",
+            "*** Add File: src/auth/new.py",
+            "+hello",
+            "*** Delete File: src/old.py",
+            "*** End Patch",
+            "PATCH",
+        ])
+        self.assertEqual(
+            recall.edit_targets({"tool_input": {"command": cmd}}),
+            ["src/auth/session.py", "src/auth/new.py", "src/old.py"])
+
+    def test_apply_patch_rename_target(self):
+        cmd = ("*** Begin Patch\n*** Update File: a.py\n"
+               "*** Move to: b.py\n*** End Patch\n")
+        self.assertEqual(recall.edit_targets({"tool_input": {"command": cmd}}),
+                         ["a.py", "b.py"])
+
+    def test_no_targets(self):
+        self.assertEqual(recall.edit_targets({}), [])
+        self.assertEqual(recall.edit_targets({"tool_input": {}}), [])
+        self.assertEqual(
+            recall.edit_targets({"tool_input": {"command": "ls -la"}}), [])
+        self.assertEqual(recall.edit_targets({"tool_input": "not-a-dict"}), [])
+
+
+class TestApplyPatchRecall(StoreCase):
+    def test_codex_apply_patch_surfaces_all_targets(self):
+        write_entry(self.store, "auth/session.md",
+                    title="Session cookie is host-only",
+                    files=("src/auth/session.py",))
+        write_entry(self.store, "db/migrations.md",
+                    title="Migrations run in one tx", files=("src/db/",))
+        ctx = self.context_of(self.run_hook({
+            "cwd": str(self.project), "session_id": "s1",
+            "tool_name": "apply_patch",
+            "tool_input": {"command": (
+                "*** Begin Patch\n"
+                "*** Update File: src/auth/session.py\n"
+                "*** Update File: src/db/migrate.py\n"
+                "*** End Patch\n")},
+        }, argv=["--pretool"]))
+        self.assertIn("Session cookie is host-only", ctx)
+        self.assertIn("Migrations run in one tx", ctx)
+        self.assertIn("src/auth/session.py", ctx)
+        self.assertIn("src/db/migrate.py", ctx)
+
+    def test_unknown_tool_is_ignored(self):
+        write_entry(self.store, "auth/session.md", title="Session",
+                    files=("src/auth/session.py",))
+        self.assertEqual(self.run_hook(
+            {"cwd": str(self.project), "tool_name": "Bash",
+             "tool_input": {"command": "*** Update File: src/auth/session.py"}},
+            argv=["--pretool"]), "")
+
+
+class TestReadTelemetry(StoreCase):
+    """PostToolUse(Read): 'was it opened?' -- the other half of 'was it shown?'"""
+
+    def _post(self, payload):
+        stdin, out = sys.stdin, io.StringIO()
+        sys.stdin = io.StringIO(json.dumps(payload))
+        try:
+            with contextlib.redirect_stdout(out):
+                recall.run_posttool()
+        finally:
+            sys.stdin = stdin
+        return out.getvalue()
+
+    def _log(self):
+        f = self.project / ".git" / "lore-recall.log"
+        return f.read_text(encoding="utf-8") if f.is_file() else ""
+
+    def test_store_read_is_logged_and_silent(self):
+        p = write_entry(self.store, "ci/cache.md", title="Cache")
+        (self.project / ".git").mkdir()
+        out = self._post({"cwd": str(self.project), "tool_name": "Read",
+                          "tool_input": {"file_path": str(p)}})
+        self.assertEqual(out, "")  # injects nothing, blocks nothing
+        self.assertIn("\tread\tlearnings/ci/cache.md", self._log())
+
+    def test_source_file_read_is_ignored(self):
+        (self.project / ".git").mkdir()
+        src = self.project / "src" / "app.py"
+        src.parent.mkdir()
+        src.write_text("x", encoding="utf-8")
+        self._post({"cwd": str(self.project), "tool_name": "Read",
+                    "tool_input": {"file_path": str(src)}})
+        self.assertEqual(self._log(), "")
+
+    def test_personal_store_read_is_logged(self):
+        p = write_entry(self.project / "private", "prefs/a.md", title="Pref")
+        (self.project / ".lore.json").write_text(
+            json.dumps({"personalStoreDir": "private"}), encoding="utf-8")
+        (self.project / ".git").mkdir()
+        self._post({"cwd": str(self.project), "tool_name": "Read",
+                    "tool_input": {"file_path": str(p)}})
+        self.assertIn("\tread\t", self._log())
+
+    def test_non_read_tool_is_ignored(self):
+        p = write_entry(self.store, "ci/cache.md", title="Cache")
+        (self.project / ".git").mkdir()
+        self._post({"cwd": str(self.project), "tool_name": "Edit",
+                    "tool_input": {"file_path": str(p)}})
+        self.assertEqual(self._log(), "")
 
 
 class TestRunHook(StoreCase):

@@ -44,11 +44,16 @@ pace is scripted.</sub>
    └─────────────────────┘
             │
             ▼
-   ┌─────────────────────┐   linter + pre-push hook
+   ┌─────────────────────┐   linter + pre-push hook + CI
    │  keep it fresh       │── flag deleted refs · drift-triage · regenerate index
    │  + guard the push    │── secret scan blocks a leak before it's published
    └─────────────────────┘
 ```
+
+**Starting from empty?** `/lore:mine` reads your git history — reverts, fix
+commits, the files with the most churn, the messages that explain a *why* — and
+proposes the first entries, so the loop has something to recall on day one
+instead of week six.
 
 The store is plain markdown in **your** repo (committed, so your team benefits). The
 behavior lives in the plugin. Nothing is sent anywhere — recall is a local text match.
@@ -109,7 +114,11 @@ surfaces right then, so the gotcha shows up exactly when you touch the code (liv
 ahead of superseded ones, and each entry only **once per session**, so a ten-edit refactor
 doesn't re-inject the same context ten times). Every
 surfaced entry is also logged to `.git/lore-recall.log` (local only, inside `.git`,
-never committed) so `/lore:stats` can show which learnings actually get used.
+never committed) — and a `PostToolUse` hook logs it again when the agent actually
+**reads** the file, so `/lore:stats` can separate *shown* from *used*: an entry
+surfaced 40 times and never opened has a misleading title, not a useful lesson.
+Recall searches **two** stores when you configure one: the committed team store and
+a private `personalStoreDir` (see [Two stores](#two-stores-team-and-personal)).
 You can also query the same scorer by hand with `/lore:search <query>`.
 
 **Capture (write).** A `Stop` hook reminds the agent, at the end of a turn, to record a
@@ -125,6 +134,14 @@ lore reminder right after **context compaction** — exactly the moment an uncap
 learning would otherwise die with the context. You can also trigger capture with
 `/lore:capture`.
 
+**Cold start (write, in bulk).** An empty store surfaces nothing, so the plugin
+looks dead and nobody captures — the failure mode that kills this idea before it
+pays off. `/lore:mine` breaks it: it scores your git history for reverts, fix
+commits, long explanatory messages, and churn hot spots, marks any candidate an
+existing entry already covers, and hands the agent a ranked worklist to write
+real entries from — under the same gate as any other capture, evidence read from
+`git show` first.
+
 **Freshness.** Code changes; learnings shouldn't silently rot. `/lore:lint` checks
 that each entry's `files:` still exist; `--report` ranks entries whose referenced code
 changed since they were last `verified:` (your re-verify worklist — computed in a single
@@ -132,16 +149,21 @@ streaming `git log` pass, not one subprocess per file); `--dupes` finds near-dup
 entry pairs (e.g. two teammates capturing the same gotcha on parallel branches) and
 category-name variants; `--index` regenerates the store's README. `/lore:stats` prints a
 store-health snapshot (counts by status/category, the drift backlog, long-unverified
-entries, recall activity incl. never-surfaced entries, near-duplicate count, dangling
-links). The optional pre-push hook runs the existence check before every push, and the
-linter warns when the `.lore/` hook copies fall behind the installed plugin version — or
-when `.lore.json` has a key the hooks are silently ignoring (a typo like `maxRecal`).
+entries, recall activity — including entries that never surface and entries that
+surface but are never read — near-duplicate count, dangling links). The optional
+pre-push hook runs the existence check before every push, and the linter warns when the
+`.lore/` hook copies fall behind the installed plugin version — or when `.lore.json`
+has a key the hooks are silently ignoring (a typo like `maxRecal`).
+For a team, `/lore:init` also offers a **CI guard** — a small GitHub Actions workflow
+running the same two scripts on every PR, so the secret scan protects everyone, not
+just whoever installed the git hook (see [Security](#security)).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `/lore:init` | Scaffold the store in this project; optionally install the pre-push hook. |
+| `/lore:init` | Scaffold the store in this project; optionally install the pre-push hook and the CI guard. |
+| `/lore:mine [--since …]` | Bootstrap from git history — propose learnings from past fixes, reverts, and churn. |
 | `/lore:capture [note]` | Capture a learning from the current work (via the skill). |
 | `/lore:search <query>` | Search the store by title/tags — the same scorer the recall hook uses. |
 | `/lore:lint [--report\|--dupes\|--index\|--strict]` | Freshness linter: ref-check, drift triage, dupe triage, index regen. |
@@ -151,7 +173,8 @@ when `.lore.json` has a key the hooks are silently ignoring (a typo like `maxRec
 
 These are **Claude Code** slash commands. On Codex there are no `/lore:*` commands —
 `init` is `python3 codex/install.py`, `capture` is the `lore` skill + the `Stop` hook,
-and `lint` is `python3 ~/.codex/lore/verify_refs.py` (see [codex/README.md](codex/README.md)).
+and `lint`/`mine` are direct `python3 ~/.codex/lore/{verify_refs,mine_history}.py`
+calls (see [codex/README.md](codex/README.md)).
 
 ## The learnings format
 
@@ -191,7 +214,8 @@ Optional `.lore.json` in your project root:
   "staleAfterMonths": 6,
   "stopWords": ["widget", "todo"],
   "secretAllow": ["\\bAKIAEXAMPLE\\b"],
-  "captureNudge": "smart"
+  "captureNudge": "smart",
+  "personalStoreDir": "~/.lore/learnings"
 }
 ```
 
@@ -208,6 +232,11 @@ for words that are noise in your domain, e.g. a product name that appears in eve
 `secretAllow` is a list of regexes; a match on a line suppresses secret-scan
 findings there (for genuine false positives or illustrative examples).
 
+`personalStoreDir` enables the private second store (`""`/absent = off). It may be
+absolute, `~`-prefixed, or project-relative; a path inside the team store is
+refused, since it would be committed anyway. See
+[Two stores](#two-stores-team-and-personal).
+
 `captureNudge` controls the end-of-turn capture nudge: `"smart"` (default —
 skip turns that used no tools at all), `"always"` (nudge every turn), or
 `"off"` (capture is manual via `/lore:capture`). Booleans work as shorthand:
@@ -215,10 +244,32 @@ skip turns that used no tools at all), `"always"` (nudge every turn), or
 ignored rather than crashing a hook — run `/lore:lint` to see which keys are
 being ignored and why.
 
-## Committed vs. private
+## Two stores: team and personal
 
-Learnings are **committed and pushed by default** so a whole team shares them. To keep
-them local/personal instead, add your store directory (e.g. `learnings/`) to `.gitignore`.
+Learnings are **committed and pushed by default** so a whole team shares them. But
+not every learning is about the codebase — the capture gate also catches *how you
+want to be worked with* ("show me the diff before committing", "don't add comments
+I didn't ask for"), and that does not belong in a teammate's PR.
+
+So there are two stores, split by **who else has to read it**:
+
+| | `storeDir` (team) | `personalStoreDir` (personal) |
+|---|---|---|
+| Contents | the codebase: bugs, gotchas, decisions | you: preferences, working conventions |
+| Committed | yes — that's the point | no (outside the repo, or gitignored) |
+| Recalled | yes | yes — same scorer, flagged `[personal]` |
+| Indexed / linted / secret-scanned | yes | no — nothing is ever published |
+
+Turn it on with one key (the skill then routes preference-shaped learnings there
+instead of the shared store):
+
+```json
+{ "personalStoreDir": "~/.lore/learnings" }
+```
+
+`/lore:stats` counts personal entries so a two-store setup never looks half-empty.
+To make the **whole** store private instead, just add your store directory (e.g.
+`learnings/`) to `.gitignore`.
 
 ## Security
 
@@ -231,13 +282,23 @@ is effectively **published the moment it's written**. The plugin is built around
   over the store and **aborts the push** if it finds a likely key/token/credential.
   Run it any time with `/lore:scan`. Bypass a false positive with `lore:allow-secret` on
   the line, a `secretAllow` regex, `LORE_SCAN_BLOCK=0`, or `git push --no-verify`.
+- **The same scan in CI, for the whole team.** A git hook only protects the machine
+  it's installed on, so one teammate who skipped `/lore:init` can still push a secret.
+  `/lore:init` offers a ~15-line `.github/workflows/lore.yml` that runs
+  `python .lore/scan_secrets.py` and `python .lore/verify_refs.py --strict` on every
+  PR — from the `.lore/` copies already committed to the repo, so CI and the local
+  hook can't drift apart, and nobody else installs anything. On Codex:
+  `python3 codex/install.py --ci`. If you'd rather wire it by hand, the file is
+  [plugin/templates/lore-ci.yml](plugin/templates/lore-ci.yml).
 - **Recall never echoes bodies.** The recall hook matches only `title` + `tags` and emits
   only paths + titles — store content is never auto-injected verbatim, which limits the
   prompt-injection surface of a shared/poisoned store. The titles it does inject are
   capped at 140 characters and stripped of control characters, so a `title:` in a
   teammate's PR can't smuggle in an instruction payload either.
-- **Hooks run code on every turn.** Recall and capture execute local Python on each prompt
-  and turn-end. Review the scripts before trusting them; on Codex, approve them via `/hooks`.
+- **Hooks run code on every turn.** Recall and capture execute local Python on each
+  prompt, each file edit, each file **read** (the usage-telemetry hook, which exits
+  immediately unless the path is inside a store), and at turn-end. Review the scripts
+  before trusting them; on Codex, approve them via `/hooks`.
 - **Pin the plugin.** Install a reviewed tag/commit rather than floating on `main`, so you
   control when new hook code starts running.
 
@@ -250,6 +311,8 @@ machine is what *you* push — which is exactly what the secret scan guards.
   restore the pre-0.3 every-turn nudge). This is per-project and survives plugin
   updates — don't edit the plugin's own `hooks.json`, that directory is an
   ephemeral cache.
+- **Keep personal preferences out of the team store:** set `personalStoreDir`
+  ([Two stores](#two-stores-team-and-personal)).
 - **Different store location/size:** use `.lore.json` (above).
 - **Recall tuning:** add noise words with `stopWords` in `.lore.json` (per-project,
   survives plugin updates); the built-in list and the scoring itself live in

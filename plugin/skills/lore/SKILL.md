@@ -27,7 +27,9 @@ never *whether* to capture it.
 - You fixed a bug whose root cause was not obvious from the symptom.
 - You made a design/tooling decision with non-obvious rationale.
 - You hit a gotcha (an API quirk, a build/deploy trap, a config footgun) that cost real time.
-- You learned how the user wants to work (a preference/convention worth keeping).
+- You learned how the user wants to work (a preference/convention worth keeping)
+  — this one routes to the **personal** store, see
+  [Where it goes](#where-it-goes--team-store-vs-personal-store).
 - The user says `/lore:capture`, "capture this", or "remember this".
 
 If none apply, capture nothing — but still emit the one-line `Lore check — no
@@ -43,6 +45,35 @@ manufacture a learning just to produce output.
 
 Skip: things the repo already records (what a function does, a fix git blame
 explains); one-off facts; restatements of existing docs (update those instead).
+
+## Where it goes — team store vs personal store
+
+Two stores, and the difference is **who else has to read it**:
+
+- **Team store** (`storeDir`, default `learnings/`) — committed and pushed.
+  Everything about the *codebase*: bugs, gotchas, decisions, conventions.
+- **Personal store** (`personalStoreDir` in `.lore.json`, e.g.
+  `~/.lore/learnings` — only when the project sets it) — private, never
+  committed. This is where a **user preference** goes: how *this* person wants
+  to be worked with ("show me the diff before you commit", "never add comments I
+  didn't ask for"). Recall reads both stores, so the preference still comes back
+  automatically; it just doesn't land in a teammate's PR.
+
+Route by that test, every time: *is this about the code, or about the person?*
+A preference in the team store is a privacy leak in slow motion — it publishes
+how a colleague likes to work to everyone with repo access.
+
+If `personalStoreDir` is **not** configured and the learning is a personal
+preference, say so and offer the one-line config instead of quietly writing it
+to the shared store:
+
+```json
+{ "personalStoreDir": "~/.lore/learnings" }
+```
+
+Everything else in this skill — the gate, the format, the overlap check — is
+identical in both stores. Only the secret scan and the index differ: the personal
+store is never scanned or indexed, because it is never pushed.
 
 ## Never write a secret into a learning
 
@@ -70,8 +101,11 @@ doesn't belong in the store.
    ```
    It lists the top existing entries by the same scorer the recall hook uses.
    High overlap with a listed entry → update it in place. Low/none → new file.
-3. **Write one file** — `<storeDir>/<category>/<kebab-slug>.md` (no date in the filename).
-4. **Scan what you just wrote** — run the secret scanner on the new/updated file
+3. **Write one file** — `<storeDir>/<category>/<kebab-slug>.md` (no date in the
+   filename), or `<personalStoreDir>/<category>/<slug>.md` for a user preference.
+4. **Scan what you just wrote** — team-store entries only (the personal store is
+   never pushed, so there is no publication boundary to guard). Run the scanner
+   on the new/updated file
    so a leak is caught at write time, not at push time:
    ```sh
    PY=$(command -v python3 || command -v python || command -v py)
@@ -81,7 +115,8 @@ doesn't belong in the store.
    ```
    If it flags anything, fix the entry **before ending the turn** (reference the
    secret, never quote it). The pre-push hook is the backstop, not the plan.
-5. **Refresh the index** — run `/lore:lint --index` so the store README lists it.
+5. **Refresh the index** — run `/lore:lint --index` so the store README lists it
+   (team store only; the personal store has no generated index).
 
 `storeDir` defaults to `learnings/` (override in `.lore.json`). `category` is
 free-form — reuse an existing folder name when one fits, otherwise add one.

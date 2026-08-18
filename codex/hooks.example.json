@@ -1,5 +1,5 @@
 {
-  "_comment": "Reference only. `codex/install.py` GENERATES the real ~/.codex/hooks.json with your interpreter + absolute paths baked in. This shows the shape if you prefer to wire it by hand. Codex `command` is a single shell string (no args array).",
+  "_comment": "Reference only. `codex/install.py` GENERATES the real ~/.codex/hooks.json with your interpreter + absolute paths baked in. This shows the shape if you prefer to wire it by hand. Codex `command` is a single shell string (no args array). PreToolUse matches `apply_patch` because that is the tool name Codex reports for a file edit (Edit/Write are aliases); recall.py reads the target paths out of the patch envelope. No PostToolUse hook: Codex has no Read tool to attribute a store read to.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -13,6 +13,18 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/usr/bin/python3\" \"/home/you/.codex/lore/recall.py\" --pretool",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
@@ -20,6 +32,18 @@
           {
             "type": "command",
             "command": "\"/usr/bin/python3\" \"/home/you/.codex/lore/capture_check.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/usr/bin/python3\" \"/home/you/.codex/lore/capture_check.py\" --compact",
             "timeout": 30
           }
         ]

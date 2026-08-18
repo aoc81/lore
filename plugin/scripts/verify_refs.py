@@ -13,8 +13,10 @@ Modes:
               baseline, ranked by gap. Best candidates for a re-verify. Heuristic.
   --stats     Store-health summary -- counts by status/category, drift backlog,
               entries unverified for a long time, recall activity (from the local
-              `.git/lore-recall.log`), near-duplicate count, and a soft
-              dangling-link count.
+              `.git/lore-recall.log`: surfaced vs actually READ, plus entries
+              that keep surfacing and never get opened), near-duplicate count,
+              and a soft dangling-link count. Also counts the private
+              `personalStoreDir`, which no other mode touches.
   --dupes     Near-duplicate report -- entry pairs whose title+tags share enough
               vocabulary to be merge candidates, plus category names that look
               like variants of each other (ci vs CI vs build-ci).
@@ -39,8 +41,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (DEFAULTS, config_issues, find_project_dir,  # noqa: E402
-                     iter_entries, load_config, norm_rel, ref_exists,
-                     ref_matches, stale_after_days, words)
+                     iter_entries, load_config, norm_rel, personal_store,
+                     ref_exists, ref_matches, rel_path, stale_after_days,
+                     words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -50,6 +53,10 @@ _DUPE_STOP = {
     "bug", "issue", "error", "problem",
 }
 _DUPE_MIN_SHARED = 3
+
+# How often an entry must have surfaced before "never read" means anything.
+# One or two surfacings with no read is normal; a dozen is a tagging problem.
+_UNREAD_MIN = 3
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -361,28 +368,57 @@ def _dangling_links(entries):
 
 
 def _recall_activity(entries, project):
-    """(top_surfaced, never_count) from `.git/lore-recall.log`, or None.
+    """Recall telemetry from `.git/lore-recall.log`, or None when absent.
 
-    The log is written by the recall hook (local only, inside .git). Absent
-    log -> None (feature inactive or no git).
+    Returns `(top, never, unread)`:
+      top    -- [(surfaced, reads, rel), ...] the 3 most-surfaced entries
+      never  -- how many entries have never surfaced at all
+      unread -- entries surfaced >= _UNREAD_MIN times that were never READ,
+                or None when the log holds no `read` events at all.
+
+    The `read` events come from the PostToolUse hook, so an install that
+    predates it (or a target with no Read tool, e.g. Codex) has none -- and then
+    "never read" would be vacuously true for every entry, which is why `unread`
+    is None rather than a full list. The log is local, inside `.git`, never
+    committed. Absent log -> None (no git, or nothing has surfaced yet).
     """
     log = project / ".git" / "lore-recall.log"
     if not log.is_file():
         return None
-    counts = {}
+    surfaced, reads = {}, {}
     try:
         for line in log.read_text(encoding="utf-8",
                                   errors="replace").splitlines():
             parts = line.split("\t")
-            if len(parts) == 3:
-                counts[parts[2]] = counts.get(parts[2], 0) + 1
+            if len(parts) != 3:
+                continue
+            bucket = reads if parts[1] == "read" else surfaced
+            bucket[parts[2]] = bucket.get(parts[2], 0) + 1
     except OSError:
         return None
-    rels = {e["path"].relative_to(project).as_posix() for e in entries}
-    top = sorted(((n, p) for p, n in counts.items() if p in rels),
-                 reverse=True)[:3]
-    never = len(rels - set(counts))
-    return top, never
+    rels = {rel_path(project, e["path"]) for e in entries}
+    top = sorted(((n, reads.get(p, 0), p) for p, n in surfaced.items()
+                  if p in rels), reverse=True)[:3]
+    never = len(rels - set(surfaced))
+    unread = None
+    if reads:
+        unread = sorted((p, n) for p, n in surfaced.items()
+                        if p in rels and n >= _UNREAD_MIN and p not in reads)
+    return top, never, unread
+
+
+def _personal_entries(project, cfg):
+    """Entries in the private store, for the stats view only.
+
+    The personal store is deliberately outside every other mode: it is not
+    committed, so there is nothing to index, no README to regenerate, and no
+    push boundary to secret-scan. Stats still counts it, because "recall found
+    nothing" is confusing when half your entries are invisible here.
+    """
+    p = personal_store(project, cfg)
+    if p is None or not p.is_dir():
+        return []
+    return list(iter_entries(p, personal=True))
 
 
 def cmd_stats(entries, project, cfg, store):
@@ -433,14 +469,29 @@ def cmd_stats(entries, project, cfg, store):
         rel = oldest[1]["path"].relative_to(project).as_posix()
         print(f"    oldest stamp: {rel}  (~{oldest[0] // 30}mo)")
     print("")
-    activity = _recall_activity(entries, project)
+    personal = _personal_entries(project, cfg)
+    activity = _recall_activity(entries + personal, project)
     if activity is not None:
-        top, never = activity
+        top, never, unread = activity
         print("  recall activity (local .git/lore-recall.log):")
-        for n, p in top:
-            print(f"    {n:4d}x  {p}")
+        for n, r, p in top:
+            print(f"    {n:4d}x surfaced, read {r}x  {p}")
         tail = "   -> tags may not match how you prompt" if never else ""
         print(f"    never surfaced: {never}{tail}")
+        if unread is None:
+            print("    reads: none logged yet (they come from the PostToolUse "
+                  "Read hook -> reinstall the plugin if it isn't running)")
+        else:
+            tail = ("   -> misleading title/tags, or noise" if unread else "")
+            print(f"    surfaced >={_UNREAD_MIN}x but never read: "
+                  f"{len(unread)}{tail}")
+            for p, n in unread[:3]:
+                print(f"      - {p}  ({n}x)")
+        print("")
+    if personal:
+        print(f"  personal store: {len(personal)} entries in "
+              f"{cfg['personalStoreDir']} (private -- recalled, never "
+              "indexed/scanned)")
         print("")
     tail = "   -> verify_refs.py --dupes" if dupes else ""
     print(f"  near-duplicate pairs (title/tag overlap): {dupes}{tail}")

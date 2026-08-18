@@ -142,25 +142,87 @@ class TestStatsThreshold(unittest.TestCase):
 
 
 class TestRecallActivity(unittest.TestCase):
+    def _activity(self, log_lines, extra_entries=()):
+        """Build a store + recall log, return `_recall_activity`'s result."""
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        store = proj / "learnings"
+        write_entry(store, "x/a.md", title="A")
+        write_entry(store, "x/b.md", title="B")
+        for rel in extra_entries:
+            write_entry(store, rel, title=rel)
+        (proj / ".git").mkdir()
+        (proj / ".git" / "lore-recall.log").write_text(
+            "".join(f"2026-07-17\t{kind}\t{path}\n" for kind, path in log_lines),
+            encoding="utf-8")
+        return verify_refs._recall_activity(list(iter_entries(store)), proj)
+
     def test_counts_and_never_surfaced(self):
-        with tempfile.TemporaryDirectory() as td:
-            proj = Path(td)
-            store = proj / "learnings"
-            a = write_entry(store, "x/a.md", title="A")
-            write_entry(store, "x/b.md", title="B")
-            (proj / ".git").mkdir()
-            rel = a.relative_to(proj).as_posix()
-            (proj / ".git" / "lore-recall.log").write_text(
-                f"2026-07-17\tprompt\t{rel}\n2026-07-17\tedit\t{rel}\n",
-                encoding="utf-8")
-            entries = list(iter_entries(store))
-            top, never = verify_refs._recall_activity(entries, proj)
-        self.assertEqual(top[0], (2, "learnings/x/a.md"))
+        top, never, unread = self._activity([
+            ("prompt", "learnings/x/a.md"), ("edit", "learnings/x/a.md")])
+        self.assertEqual(top[0], (2, 0, "learnings/x/a.md"))
         self.assertEqual(never, 1)
+        # No `read` event anywhere -> "never read" is unknowable, not True.
+        self.assertIsNone(unread)
+
+    def test_reads_are_counted_separately(self):
+        top, _never, unread = self._activity([
+            ("prompt", "learnings/x/a.md"), ("read", "learnings/x/a.md"),
+            ("read", "learnings/x/a.md")])
+        self.assertEqual(top[0], (1, 2, "learnings/x/a.md"))
+        self.assertEqual(unread, [])  # a.md was read; b.md never surfaced
+
+    def test_surfaced_but_never_read_is_reported(self):
+        log = [("prompt", "learnings/x/a.md")] * verify_refs._UNREAD_MIN
+        log += [("prompt", "learnings/x/b.md"), ("read", "learnings/x/b.md")]
+        _top, _never, unread = self._activity(log)
+        self.assertEqual(unread, [("learnings/x/a.md", verify_refs._UNREAD_MIN)])
+
+    def test_below_threshold_is_not_reported(self):
+        log = [("prompt", "learnings/x/a.md")] * (verify_refs._UNREAD_MIN - 1)
+        log += [("read", "learnings/x/b.md")]
+        _top, _never, unread = self._activity(log)
+        self.assertEqual(unread, [])
 
     def test_none_without_log(self):
         with tempfile.TemporaryDirectory() as td:
             self.assertIsNone(verify_refs._recall_activity([], Path(td)))
+
+
+class TestPersonalStoreStats(unittest.TestCase):
+    def test_personal_entries_counted_and_attributed(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            write_entry(store, "x/a.md", title="A")
+            write_entry(proj / "private", "prefs/p.md", title="P")
+            (proj / ".git").mkdir()
+            (proj / ".git" / "lore-recall.log").write_text(
+                "2026-07-17\tprompt\tprivate/prefs/p.md\n", encoding="utf-8")
+            cfg = dict(DEFAULTS, personalStoreDir="private")
+            self.assertEqual(
+                [e["title"] for e in verify_refs._personal_entries(proj, cfg)],
+                ["P"])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                verify_refs.cmd_stats(list(iter_entries(store)), proj, cfg,
+                                      store)
+        text = out.getvalue()
+        self.assertIn("personal store: 1 entries in private", text)
+        # the personal entry surfaced, so only the team entry is "never surfaced"
+        self.assertIn("never surfaced: 1", text)
+
+    def test_absent_personal_store_prints_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            write_entry(store, "x/a.md", title="A")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                verify_refs.cmd_stats(list(iter_entries(store)), proj,
+                                      dict(DEFAULTS), store)
+        self.assertNotIn("personal store", out.getvalue())
 
 
 @unittest.skipUnless(GIT, "git not available")

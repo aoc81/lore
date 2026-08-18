@@ -14,9 +14,23 @@ As a `PreToolUse` hook (`recall.py --pretool`, tool JSON on stdin): when about t
 Edit/Write a file, surface learnings whose frontmatter `files:` covers that path
 (exact, directory prefix `dir/`, or glob) -- edit-time recall, so a gotcha shows
 up exactly when you touch the code. Silent unless a learning names the target.
+Codex routes every file edit through one `apply_patch` tool whose `tool_input`
+carries the patch text rather than a `file_path`, so the target paths are also
+read out of the patch envelope -- one apply_patch may touch several files.
 An entry already surfaced this way is not re-injected for the rest of the
 session (a 10-edit refactor injects it once, not ten times); the session id and
 the entries shown are kept in `.git/lore-recall-seen.json`, local only.
+
+As a `PostToolUse` hook (`recall.py --posttool`, tool JSON on stdin): when the
+agent Reads a file that lives inside a store, log it as `kind=read`. Surfacing
+is not usefulness -- an entry that wins the scorer 40 times and is never opened
+has misleading tags (or is noise), and only the read event can tell the two
+apart. `/lore:stats` reports the difference. Silent always; telemetry only.
+
+Recall reads TWO stores: the committed team store (`storeDir`) and, when
+configured, the private `personalStoreDir` -- so a personal preference can be
+recalled without being published in a teammate's PR. Personal entries are
+flagged `[personal]` when surfaced.
 
 Matching is word-boundary, not substring: an exact word hit scores 2, a >=4-char
 prefix overlap (stemming-ish: "test"/"testing") scores 1, and an entry needs a
@@ -47,8 +61,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (find_project_dir, fold, iter_entries,  # noqa: E402
-                     load_config, norm_rel, ref_exists, ref_matches, words)
+from _common import (find_project_dir, fold, is_under,  # noqa: E402
+                     iter_store_entries, load_config, norm_rel, ref_exists,
+                     ref_matches, rel_path, store_dirs, words)
 
 # Generic words that would over-match. Domain words are intentionally absent.
 # Entries are diacritic-folded (see _common.fold), so accented fillers are
@@ -114,18 +129,30 @@ def freshness_flags(e, project, cfg):
 
     Both thresholds come from `cfg`, so a project that redefines
     `staleStatuses` or `staleAfterMonths` gets the same answer everywhere.
+    The deleted-ref check is skipped for an entry stored OUTSIDE the project (a
+    personal store in `~`), whose `files:` may well name another repo's paths --
+    resolving them against this project would flag every entry.
     """
     flags = []
-    if e["status"] not in set(cfg["staleStatuses"]):
-        missing = [f for f in e["files"] if f and not ref_exists(project, f)]
-        if missing:
-            flags.append("! refs a deleted file")
+    checkable = not e.get("personal") or is_under(project, e["path"])
+    if checkable and _refs_a_deleted_file(e, project, cfg):
+        flags.append("! refs a deleted file")
     stamp = e["verified"] or e["date"]
     months = _months_since(stamp) if stamp else None
     if months is not None and months >= cfg["staleAfterMonths"]:
         label = "verified" if e["verified"] else "written"
         flags.append(f"{label} {months}mo ago")
     return flags
+
+
+def _refs_a_deleted_file(e, project, cfg):
+    """True when a LIVE entry names a path that no longer exists.
+
+    A stale entry pointing at deleted code is expected, not a signal.
+    """
+    if e["status"] in set(cfg["staleStatuses"]):
+        return False
+    return any(f and not ref_exists(project, f) for f in e["files"])
 
 
 def score_entry(tokens, short, e):
@@ -157,11 +184,12 @@ def stop_words(cfg):
     return STOP | {fold(w) for w in cfg["stopWords"] if w.strip()}
 
 
-def rank_matches(text, store, cfg):
-    """Rank store entries by title+tags word overlap with `text`.
+def rank_matches(text, stores, cfg):
+    """Rank entries by title+tags word overlap with `text`.
 
     Returns [(stale_bool, entry), ...] best-first, capped to maxRecall.
     Same scorer for the prompt hook and the capture-time overlap check.
+    `stores` is `store_dirs()`'s list (team + personal) or a single store path.
     """
     stop = stop_words(cfg)
     toks = words(text)
@@ -171,7 +199,7 @@ def rank_matches(text, store, cfg):
         return []
     stale_set = set(cfg["staleStatuses"])
     found = []
-    for e in iter_entries(store):
+    for e in iter_store_entries(stores):
         score = score_entry(tokens, short, e)
         if score >= MIN_SCORE:
             stale = e["status"] in stale_set
@@ -182,21 +210,26 @@ def rank_matches(text, store, cfg):
     return [(stale, e) for _eff, _s, stale, e in found[: cfg["maxRecall"]]]
 
 
-def match_by_file(target_rel, store, cfg):
-    """Learnings whose frontmatter `files:` covers `target_rel`, best-first.
+def match_by_file(targets, stores, cfg):
+    """Learnings whose frontmatter `files:` covers any of `targets`, best-first.
 
     A ref matches as an exact path, a directory prefix (`src/auth/`), or a
-    glob (`src/auth/*.py`). The match key is the file you're about to edit,
-    not prompt tokens -- this powers edit-time (PreToolUse) recall.
+    glob (`src/auth/*.py`). The match key is the file(s) you're about to edit,
+    not prompt tokens -- this powers edit-time (PreToolUse) recall. `targets`
+    is one project-relative path or a list of them (a Codex `apply_patch` can
+    rewrite several files in one tool call).
 
     Current entries sort before stale ones (`staleStatuses` from cfg, same as
     the prompt scorer) so that truncating to `maxRecall` can never drop a live
     learning in favour of a superseded one; ties keep store order.
     """
+    if isinstance(targets, str):
+        targets = [targets]
     stale_set = set(cfg["staleStatuses"])
     matches = []
-    for e in iter_entries(store):
-        if any(ref_matches(f, target_rel) for f in e["files"] if f):
+    for e in iter_store_entries(stores):
+        refs = [f for f in e["files"] if f]
+        if any(ref_matches(f, t) for f in refs for t in targets):
             matches.append((e["status"] in stale_set, e))
     matches.sort(key=lambda m: m[0])  # stable: False (current) first
     return matches
@@ -211,10 +244,12 @@ def _safe_title(title):
 
 
 def _format_entry(e, stale, project, cfg):
-    rel = e["path"].relative_to(project).as_posix()
+    rel = rel_path(project, e["path"])
     bits = []
     if stale:
         bits.append("SUPERSEDED -- apply the principle, not the file/code refs")
+    if e.get("personal"):
+        bits.append("personal")
     bits.extend(freshness_flags(e, project, cfg))
     tag = f"  [{' | '.join(bits)}]" if bits else ""
     return f"- {rel} - {_safe_title(e['title'])}{tag}"
@@ -225,8 +260,12 @@ _LOG_MAX_BYTES = 262144
 _LOG_KEEP_LINES = 1500
 
 
-def log_recall(project, kind, entries):
-    """Append surfaced entries to `.git/lore-recall.log` (never committed).
+def log_recall(project, kind, paths):
+    """Append store-entry events to `.git/lore-recall.log` (never committed).
+
+    `kind` is `prompt`/`edit` (the entry was SURFACED) or `read` (the agent
+    actually opened the file) -- `/lore:stats` compares the two, because an
+    entry that surfaces constantly and is never read is noise, not knowledge.
 
     Best-effort and silent: telemetry must never break the hook. Skipped when
     `.git` is not a directory (bare repos, worktrees, no git).
@@ -237,10 +276,7 @@ def log_recall(project, kind, entries):
             return
         log = git_dir / "lore-recall.log"
         today = datetime.date.today().isoformat()
-        lines = [
-            f"{today}\t{kind}\t{e['path'].relative_to(project).as_posix()}\n"
-            for e in entries
-        ]
+        lines = [f"{today}\t{kind}\t{rel_path(project, p)}\n" for p in paths]
         if log.exists() and log.stat().st_size > _LOG_MAX_BYTES:
             tail = log.read_text(encoding="utf-8",
                                  errors="replace").splitlines(True)
@@ -283,7 +319,7 @@ def unseen_matches(project, session_id, matches):
         known = set(seen)
         fresh, added = [], []
         for stale, e in matches:
-            rel = e["path"].relative_to(project).as_posix()
+            rel = rel_path(project, e["path"])
             if rel in known:
                 continue
             known.add(rel)
@@ -299,6 +335,11 @@ def unseen_matches(project, session_id, matches):
         return matches
 
 
+def _live_stores(project, cfg):
+    """The stores that actually exist on disk ([] when there is nothing to search)."""
+    return [(s, p) for s, p in store_dirs(project, cfg) if s.is_dir()]
+
+
 def run_hook():
     raw = sys.stdin.read()
     if not raw.strip():
@@ -312,13 +353,13 @@ def run_hook():
         return
     project = find_project_dir(data)
     cfg = load_config(project)
-    store = project / cfg["storeDir"]
-    if not store.is_dir():
+    stores = _live_stores(project, cfg)
+    if not stores:
         return
-    matches = rank_matches(prompt, store, cfg)
+    matches = rank_matches(prompt, stores, cfg)
     if not matches:
         return
-    log_recall(project, "prompt", [e for _s, e in matches])
+    log_recall(project, "prompt", [e["path"] for _s, e in matches])
     lines = [_format_entry(e, stale, project, cfg) for stale, e in matches]
     ctx = (
         "Possibly-relevant prior learnings (Read a file only if it applies to "
@@ -335,11 +376,11 @@ def run_hook():
 def run_query(text):
     project = find_project_dir()
     cfg = load_config(project)
-    store = project / cfg["storeDir"]
-    if not store.is_dir():
+    stores = _live_stores(project, cfg)
+    if not stores:
         print("No learnings store found.")
         return
-    matches = rank_matches(text, store, cfg)
+    matches = rank_matches(text, stores, cfg)
     if not matches:
         print("No related learnings found -- looks new; create a fresh entry.")
         return
@@ -350,6 +391,38 @@ def run_query(text):
     print("   near-duplicate. Only add a new file if none truly overlaps.")
 
 
+_EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch")
+
+# Codex reports every file edit as `apply_patch` with the patch envelope in
+# `tool_input.command`, so the targets come from its header lines:
+#   *** Add File: a.py / *** Update File: a.py / *** Delete File: a.py
+#   *** Move to: b.py            (rename target of the preceding Update)
+_PATCH_TARGET = re.compile(
+    r"^\*\*\*\s+(?:Add File|Update File|Delete File|Move to):\s*(.+?)\s*$",
+    re.M)
+
+
+def edit_targets(data):
+    """Project-relative-ish paths a tool call is about to write (may be empty)."""
+    tinput = data.get("tool_input") or {}
+    if not isinstance(tinput, dict):
+        return []
+    direct = tinput.get("file_path") or tinput.get("notebook_path") or ""
+    if direct:
+        return [str(direct)]
+    cmd = tinput.get("command") or tinput.get("patch") or tinput.get("input")
+    if not isinstance(cmd, str):
+        return []
+    return list(dict.fromkeys(_PATCH_TARGET.findall(cmd)))
+
+
+def _project_rel(project, fp):
+    try:
+        return Path(fp).resolve().relative_to(project.resolve()).as_posix()
+    except (ValueError, OSError):
+        return norm_rel(fp)
+
+
 def run_pretool():
     raw = sys.stdin.read()
     if not raw.strip():
@@ -358,23 +431,18 @@ def run_pretool():
         data = json.loads(raw)
     except ValueError:
         return
-    if (data.get("tool_name") or "") not in ("Edit", "Write", "MultiEdit",
-                                             "NotebookEdit"):
+    if (data.get("tool_name") or "") not in _EDIT_TOOLS:
         return
-    tinput = data.get("tool_input") or {}
-    fp = tinput.get("file_path") or tinput.get("notebook_path") or ""
-    if not fp:
+    targets = edit_targets(data)
+    if not targets:
         return
     project = find_project_dir(data)
     cfg = load_config(project)
-    store = project / cfg["storeDir"]
-    if not store.is_dir():
+    stores = _live_stores(project, cfg)
+    if not stores:
         return
-    try:
-        rel = Path(fp).resolve().relative_to(project.resolve()).as_posix()
-    except (ValueError, OSError):
-        rel = norm_rel(fp)
-    matches = match_by_file(rel, store, cfg)
+    rels = [_project_rel(project, t) for t in targets]
+    matches = match_by_file(rels, stores, cfg)
     if not matches:
         return  # stay silent unless a learning names this file
     # sorted current-first by match_by_file, so the cap drops stale entries
@@ -383,10 +451,11 @@ def run_pretool():
                              matches[: cfg["maxRecall"]])
     if not matches:
         return  # already surfaced for this session -- don't repeat it
-    log_recall(project, "edit", [e for _s, e in matches])
+    log_recall(project, "edit", [e["path"] for _s, e in matches])
     lines = [_format_entry(e, stale, project, cfg) for stale, e in matches]
+    subject = "`" + "`, `".join(rels) + "`"
     ctx = (
-        f"Lore -- learnings recorded about `{rel}` (consider before editing):\n"
+        f"Lore -- learnings recorded about {subject} (consider before editing):\n"
         + "\n".join(lines)
     )
     print(json.dumps({
@@ -397,12 +466,42 @@ def run_pretool():
     }))
 
 
+def run_posttool():
+    """PostToolUse(Read): log a store file the agent actually opened.
+
+    Always silent -- it injects nothing and blocks nothing. `kind=read` is what
+    turns the recall log from "what was offered" into "what was used": an entry
+    surfaced 40 times and never read is a tagging problem, not a learning.
+    """
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return
+    if (data.get("tool_name") or "") not in ("Read", "NotebookRead"):
+        return
+    tinput = data.get("tool_input") or {}
+    fp = (tinput.get("file_path") or tinput.get("notebook_path") or ""
+          if isinstance(tinput, dict) else "")
+    if not fp:
+        return
+    project = find_project_dir(data)
+    cfg = load_config(project)
+    if not any(is_under(store, fp) for store, _p in store_dirs(project, cfg)):
+        return  # an ordinary source file -- not our telemetry
+    log_recall(project, "read", [Path(fp)])
+
+
 def main():
     argv = sys.argv[1:]
     if argv and argv[0] == "--query":
         run_query(" ".join(argv[1:]))
     elif argv and argv[0] == "--pretool":
         run_pretool()
+    elif argv and argv[0] == "--posttool":
+        run_posttool()
     else:
         run_hook()
 

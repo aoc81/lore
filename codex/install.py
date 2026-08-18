@@ -2,13 +2,15 @@
 """Install the Lore recall + capture hooks for OpenAI Codex (stdlib only).
 
 Default: a GLOBAL (user-scoped) install. Copies the shared Lore scripts into
-$CODEX_HOME/lore, registers the UserPromptSubmit (recall) and Stop (capture)
-hooks in $CODEX_HOME/hooks.json with the absolute interpreter path baked in,
-installs the capture skill under ~/.agents/skills/lore, and enables
-`[features] hooks = true` in config.toml.
+$CODEX_HOME/lore, registers four hooks in $CODEX_HOME/hooks.json with the
+absolute interpreter path baked in -- UserPromptSubmit (prompt recall),
+PreToolUse (edit-time recall), Stop (capture nudge), and SessionStart/compact
+(post-compaction reminder) -- installs the capture skill under
+~/.agents/skills/lore, and enables `[features] hooks = true` in config.toml.
 
   python3 codex/install.py            # global install (once per machine)
   python3 codex/install.py --store    # scaffold a learnings/ store in THIS project
+  python3 codex/install.py --ci       # add the CI secret-scan guard to THIS repo
   python3 codex/install.py --uninstall
 
 Why bake the interpreter path: Codex hook `command` is a single shell string with
@@ -29,7 +31,8 @@ SRC = HERE.parent / "plugin"                       # shared core lives under plu
 SCRIPTS = SRC / "scripts"
 SKILL_SRC = SRC / "skills" / "lore" / "SKILL.md"
 TEMPLATES = SRC / "templates"
-CORE = ["recall.py", "capture_check.py", "verify_refs.py", "scan_secrets.py", "_common.py"]
+CORE = ["recall.py", "capture_check.py", "verify_refs.py", "scan_secrets.py",
+        "mine_history.py", "_common.py"]
 
 
 def codex_home():
@@ -45,16 +48,44 @@ def _is_ours(command, lore_dir):
     return lore_dir.as_posix() in command
 
 
-def _merge_hooks(hooks_path, lore_dir):
+def _hook_groups(lore_dir):
+    """The Codex hooks.json groups Lore registers, one per event.
+
+    Codex's hook surface has caught up with Claude Code's, so all four events
+    the plugin relies on are wired here:
+
+      UserPromptSubmit -> prompt recall            (additionalContext)
+      PreToolUse       -> edit-time recall          (additionalContext, tool matcher)
+      Stop             -> capture nudge             (decision:block)
+      SessionStart     -> post-compaction reminder  (additionalContext, source matcher)
+
+    The PreToolUse matcher lists `apply_patch` first because that is the tool
+    name Codex actually reports for a file edit (Edit/Write are aliases of it);
+    recall.py reads the target paths out of the patch envelope.
+
+    Not registered: the PostToolUse `Read` telemetry hook. Codex has no Read
+    tool -- file reads go through Bash or an MCP server -- so there is no
+    reliable event to attribute a store read to.
+    """
     py = sys.executable
     recall = f'"{py}" "{(lore_dir / "recall.py").as_posix()}"'
     capture = f'"{py}" "{(lore_dir / "capture_check.py").as_posix()}"'
-    groups = {
+    return {
         "UserPromptSubmit": {"matcher": "", "hooks": [
             {"type": "command", "command": recall, "timeout": 30}]},
+        "PreToolUse": {"matcher": "apply_patch|Edit|Write", "hooks": [
+            {"type": "command", "command": f"{recall} --pretool",
+             "timeout": 30}]},
         "Stop": {"matcher": "", "hooks": [
             {"type": "command", "command": capture, "timeout": 30}]},
+        "SessionStart": {"matcher": "compact", "hooks": [
+            {"type": "command", "command": f"{capture} --compact",
+             "timeout": 30}]},
     }
+
+
+def _merge_hooks(hooks_path, lore_dir):
+    groups = _hook_groups(lore_dir)
     data = {}
     if hooks_path.is_file():
         try:
@@ -117,15 +148,57 @@ def install():
 
     print("Lore installed for Codex.")
     print(f"  scripts : {lore_dir}")
-    print(f"  hooks   : {home / 'hooks.json'}  (UserPromptSubmit -> recall, Stop -> capture)")
+    print(f"  hooks   : {home / 'hooks.json'}")
+    print("            UserPromptSubmit -> prompt recall")
+    print("            PreToolUse(apply_patch|Edit|Write) -> edit-time recall")
+    print("            Stop -> capture nudge")
+    print("            SessionStart(compact) -> post-compaction reminder")
     print(f"  skill   : {skill_dir / 'SKILL.md'}")
     print(f"  config  : [features] hooks {feat}")
     print(f"  python  : {sys.executable}")
     print("\nNext:")
     print("  1. Open Codex and run /hooks to REVIEW AND TRUST the new hooks")
-    print("     (Codex skips untrusted command hooks until you approve them).")
+    print("     (Codex skips untrusted command hooks until you approve them;")
+    print("      trust is per-command, so re-approve after an upgrade).")
     print("  2. In a project:  python3 codex/install.py --store   (scaffold ./learnings)")
     print("     or just start working — the store is created on first capture.")
+    print("  3. Optional, per repo:  python3 codex/install.py --ci")
+    print("     (commits the store's secret-scan guard as a GitHub Actions check)")
+    return 0
+
+
+def install_ci(target):
+    """Copy the guard scripts to <repo>/.lore/ and add the CI workflow.
+
+    The pre-push secret scan only protects the machine that installed it. On a
+    shared repo the PR is the only boundary everyone passes through, so the same
+    two scripts run there -- from committed copies, so CI and local checks can't
+    drift apart. This is the Codex equivalent of what /lore:init offers.
+    """
+    root = Path(target).resolve()
+    lore_dir = root / ".lore"
+    lore_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("scan_secrets.py", "verify_refs.py", "_common.py"):
+        shutil.copy2(SCRIPTS / name, lore_dir / name)
+    try:
+        version = json.loads(
+            (SRC / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        ).get("version", "")
+    except (OSError, ValueError):
+        version = ""
+    if version:
+        (lore_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
+    wf_dir = root / ".github" / "workflows"
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    wf = wf_dir / "lore.yml"
+    if wf.exists():
+        print(f"Workflow already exists, left untouched: {wf}")
+    else:
+        shutil.copy2(TEMPLATES / "lore-ci.yml", wf)
+        print(f"Wrote {wf}")
+    print(f"Copied guard scripts to {lore_dir}")
+    print("  Commit BOTH .lore/ and the workflow — CI runs the committed copies.")
+    print("  Re-run --ci after upgrading Lore to refresh them.")
     return 0
 
 
@@ -155,7 +228,7 @@ def uninstall():
             data = json.loads(hooks_path.read_text(encoding="utf-8"))
         except ValueError:
             data = {}
-        for event in ("UserPromptSubmit", "Stop"):
+        for event in _hook_groups(lore_dir):
             groups = data.get("hooks", {}).get(event, [])
             kept = [g for g in groups if not _is_ours(
                 " ".join(h.get("command", "") for h in g.get("hooks", [])), lore_dir)]
@@ -176,12 +249,17 @@ def main():
     ap = argparse.ArgumentParser(description="Install Lore for OpenAI Codex.")
     ap.add_argument("--store", nargs="?", const=".", metavar="DIR",
                     help="scaffold a learnings/ store in DIR (default: current project)")
+    ap.add_argument("--ci", nargs="?", const=".", metavar="DIR",
+                    help="add the CI secret-scan guard to the repo in DIR "
+                         "(.lore/ copies + .github/workflows/lore.yml)")
     ap.add_argument("--uninstall", action="store_true", help="remove the Codex install")
     args = ap.parse_args()
     if args.uninstall:
         return uninstall()
     if args.store is not None:
         return scaffold_store(args.store)
+    if args.ci is not None:
+        return install_ci(args.ci)
     return install()
 
 

@@ -14,6 +14,9 @@ DEFAULTS = {
     "captureNudge": "smart",  # always | smart (skip tool-less turns) | off
     "staleAfterMonths": 6,  # freshness threshold, shared by recall + the linter
     "stopWords": [],  # extra recall stop words, ADDED to the built-in list
+    # Optional PRIVATE second store, read by recall alongside the team store.
+    # "" = off. May be absolute, ~-prefixed, or project-relative.
+    "personalStoreDir": "",
 }
 
 _NUDGE_MODES = ("always", "smart", "off")
@@ -37,6 +40,8 @@ def _valid(key, value):
     """Type-check one `.lore.json` value; a bad type must never crash a hook."""
     if key == "storeDir":
         return isinstance(value, str) and bool(value.strip())
+    if key == "personalStoreDir":
+        return isinstance(value, str)  # "" is the documented off switch
     if key in ("maxRecall", "staleAfterMonths"):
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
     if key in ("staleStatuses", "secretAllow", "stopWords"):
@@ -93,6 +98,73 @@ def config_issues(project):
 def stale_after_days(cfg):
     """The freshness threshold in days (the linter's unit; recall uses months)."""
     return int(round(cfg["staleAfterMonths"] * _DAYS_PER_MONTH))
+
+
+# --- the two stores: team (committed) + personal (private) --------------------
+# The team store is committed and published; a personal preference ("always run
+# the tests before you tell me you're done") does not belong in a teammate's PR.
+# `personalStoreDir` is the private half: recall reads it alongside the team
+# store, but it is never indexed, linted, or secret-scanned -- it isn't pushed.
+
+def is_under(parent, path):
+    """True when `path` resolves inside `parent` (or is `parent` itself)."""
+    try:
+        Path(path).resolve().relative_to(Path(parent).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def personal_store(project, cfg):
+    """Resolved personal store Path, or None when unset/redundant.
+
+    The configured value may be absolute, `~`-prefixed (`~/.lore/learnings`),
+    or project-relative (`.lore/personal`). Returns None when the key is empty
+    or when it lands inside the team store, where its entries would be found
+    twice and committed anyway. Existence is the caller's business.
+    """
+    raw = str(cfg.get("personalStoreDir") or "").strip()
+    if not raw:
+        return None
+    try:
+        p = Path(raw).expanduser()
+    except RuntimeError:  # no home dir to expand ~ against
+        return None
+    if not p.is_absolute():
+        p = Path(project) / p
+    if is_under(Path(project) / cfg["storeDir"], p):
+        return None
+    return p
+
+
+def store_dirs(project, cfg):
+    """`[(store, is_personal), ...]` to search: team store first, then personal."""
+    stores = [(Path(project) / cfg["storeDir"], False)]
+    personal = personal_store(project, cfg)
+    if personal is not None:
+        stores.append((personal, True))
+    return stores
+
+
+def normalize_stores(stores):
+    """Accept either one store path or a `[(store, is_personal), ...]` list."""
+    if isinstance(stores, (list, tuple)):
+        return [(Path(s), bool(flag)) for s, flag in stores]
+    return [(Path(stores), False)]
+
+
+def rel_path(project, path):
+    """Display path for an entry: project-relative inside, absolute outside.
+
+    Personal entries usually live outside the repo (`~/.lore/learnings`), where
+    `relative_to` would raise -- so they are shown, logged, and deduped by
+    absolute path instead.
+    """
+    path = Path(path)
+    try:
+        return path.relative_to(project).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 # --- text tokenizing (shared by recall and the dupe finder) ------------------
@@ -187,11 +259,12 @@ def read_frontmatter(path):
         return None
 
 
-def iter_entries(store):
+def iter_entries(store, personal=False):
     """Yield a normalized dict per learning file under `store`.
 
     Skips README.md and any `_`/`.`-prefixed file (templates, partials) so they
     never count as entries, show up in the index, or match in recall.
+    `personal` tags every yielded entry as coming from the private store.
     """
     store = Path(store)
     for p in sorted(store.rglob("*.md")):
@@ -215,7 +288,22 @@ def iter_entries(store):
             "date": str(fm.get("date") or ""),
             "verified": str(fm.get("verified") or ""),
             "category": str(fm.get("category") or p.parent.name),
+            "personal": personal,
         }
+
+
+def iter_store_entries(stores):
+    """Entries from every existing store in `stores`, team store first.
+
+    `stores` is what `store_dirs()` returns, or a single path (the historical
+    single-store call shape, kept so callers that only ever mean the team store
+    stay readable).
+    """
+    for store, personal in normalize_stores(stores):
+        if not store.is_dir():
+            continue
+        for e in iter_entries(store, personal=personal):
+            yield e
 
 
 # --- file-reference matching -------------------------------------------------

@@ -1,0 +1,44 @@
+# Lore CI guard — the team-wide half of the store's safety net.
+#
+# The blocking pre-push secret scan only protects machines that ran /lore:init.
+# A teammate who never installed the git hook can push a learning that quotes a
+# real key — and the store is committed and published by default. This workflow
+# closes that gap at the PR boundary, where nobody has to install anything.
+#
+# It runs the SAME two scripts the pre-push hook runs, from the `.lore/` copies
+# that /lore:init commits into the repo — so CI and local checks can never drift
+# apart, and the workflow needs no plugin, no marketplace, and no pip install.
+#
+# Installed by /lore:init (or copy this file to .github/workflows/lore.yml).
+name: lore
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      # BLOCKING. A learning that quotes a key/token/credential must not merge:
+      # merging it publishes it. Fix by referencing the secret instead of
+      # quoting it — and rotate it, since it is already in the branch history.
+      # False positive? `lore:allow-secret` on the line, or a `secretAllow`
+      # regex in .lore.json.
+      - name: Secret scan (blocking)
+        run: python .lore/scan_secrets.py
+
+      # Freshness. --strict fails when a `current` entry points at a file that
+      # no longer exists, which is the cheapest possible staleness signal.
+      # Drop --strict to make this advisory instead of blocking.
+      - name: Freshness check
+        run: python .lore/verify_refs.py --strict
