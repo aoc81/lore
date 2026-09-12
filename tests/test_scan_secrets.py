@@ -36,6 +36,26 @@ class TestScanFile(unittest.TestCase):
         found = _scan('password = "h8s7d6f5g4h3j2k1"')
         self.assertEqual(len(found), 1)
 
+    def test_prefixed_secret_names_flagged(self):
+        # `\b` cannot fire between `_` and a letter, so an earlier version of this
+        # rule missed every prefixed spelling -- which is most of them in practice.
+        for line in ('db_password = "h8s7d6f5g4h3j2k1"',
+                     'my_api_key = "AbCd1234EfGh5678"',
+                     'STRIPE_SECRET = "AbCd1234EfGh5678"',
+                     'aws_secret_access_key = "wJalrXUtnFEMI7K7MDENGbPxRfiCYEX"',
+                     "DATABASE_PASSWORD=s3cr3tp4ssw0rd"):
+            with self.subTest(line=line):
+                self.assertEqual(len(_scan(line)), 1)
+
+    def test_prefixed_placeholder_still_not_flagged(self):
+        # Widening the name must not cost the placeholder filter its job.
+        self.assertEqual(_scan("db_password = changeme"), [])
+        self.assertEqual(_scan('my_api_key = "your_key_here"'), [])
+
+    def test_short_or_nonsecret_values_not_flagged(self):
+        self.assertEqual(_scan("password: x"), [])
+        self.assertEqual(_scan("secret_name = db"), [])
+
     def test_inline_allow(self):
         fake = "AKIA" + "C" * 16
         self.assertEqual(_scan(f"{fake}  lore:allow-secret"), [])

@@ -51,10 +51,18 @@ _RULES = [
     ("JWT", r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]{10,}\b"),
     ("Bearer token", r"(?i)\bbearer\s+[A-Za-z0-9_\-\.=]{20,}"),
     ("Credentials in URL", r"\b[a-z][a-z0-9+.\-]*://[^\s:@/]+:([^\s:@/]{3,})@[^\s/]+"),
-    # secret-ish assignment with a real-looking value (placeholders filtered below)
+    # secret-ish assignment with a real-looking value (placeholders filtered below).
+    # The keyword is deliberately NOT wrapped in `\b`: `_` is a word character, so
+    # `\b` never fires between an underscore and a letter, and `db_password`,
+    # `STRIPE_SECRET` and `aws_secret_access_key` — the dominant real-world
+    # spellings — all slipped through. Affixes are flat character classes rather
+    # than nested quantifiers, so backtracking stays linear.
+    # The value must stay capture group 1: `_is_placeholder` reads `group(1)`.
     ("Hardcoded secret assignment",
-     r"(?i)\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|"
-     r"auth[_-]?token|client[_-]?secret|private[_-]?key)\b\s*[:=]\s*"
+     r"(?i)(?:^|[^A-Za-z0-9])[A-Za-z0-9_.-]{0,40}"
+     r"(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|"
+     r"auth[_-]?token|client[_-]?secret|private[_-]?key)"
+     r"[A-Za-z0-9_.-]{0,40}\s*[:=]\s*"
      r"['\"]?([^\s'\"]{6,})['\"]?"),
 ]
 RULES = [(name, re.compile(pat)) for name, pat in _RULES]
