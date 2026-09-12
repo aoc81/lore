@@ -135,7 +135,15 @@ def cmd_check(entries, project, cfg, strict):
                 issues.append((e, ref, actionable))
     notes = [n for n in (config_warning(project), version_warning(project)) if n]
     if not issues:
-        print("OK  learnings: all entries have valid frontmatter file refs.")
+        if entries:
+            print("OK  learnings: all entries have valid frontmatter file refs.")
+        else:
+            # "all entries are valid" after checking none reads as a clean bill
+            # of health. Say what was actually examined -- the personal store is
+            # out of scope here (see `_personal_entries`), so a personal-only
+            # project would otherwise be told everything is fine, twice over.
+            print("OK  learnings: no entries in the team store - nothing to "
+                  "check (the personal store is not ref-checked).")
         for n in notes:
             print(f"  {n}")
         return 0
@@ -554,10 +562,25 @@ def main():
     project = find_project_dir()
     cfg = load_config(project)
     store = project / cfg["storeDir"]
+    # A project can legitimately run personal-store-only: `personalStoreDir` set,
+    # no team store. Bailing on the team store alone made every mode dead there
+    # while recall and capture kept working -- the store looked healthy and its
+    # maintenance tooling was silently gone. Only give up when BOTH are absent.
+    # Which entries each mode covers is unchanged: the personal store stays out
+    # of everything but --stats, for the reasons in `_personal_entries`.
+    personal = personal_store(project, cfg)
+    has_personal = personal is not None and personal.is_dir()
     if not store.is_dir():
-        print(f"No learnings store at {store} - run /lore:init first.")
-        return 0
-    entries = list(iter_entries(store))
+        if not has_personal:
+            print(f"No learnings store at {store} - run /lore:init first.")
+            return 0
+        if args.index:
+            # --index regenerates the team store's README; there is no team
+            # store, and the personal one is deliberately never indexed.
+            print(f"No team store at {store} - nothing to index "
+                  f"(the personal store is never indexed).")
+            return 0
+    entries = list(iter_entries(store)) if store.is_dir() else []
     if args.index:
         return cmd_index(entries, project, cfg, store)
     if args.stats:

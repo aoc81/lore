@@ -1,12 +1,15 @@
 """Tests for verify_refs.py: dates, dupes, config, index, git drift."""
 import contextlib
 import io
+import json
+import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest import mock
 
 import _util  # noqa: F401
 from _common import DEFAULTS, iter_entries
@@ -223,6 +226,71 @@ class TestPersonalStoreStats(unittest.TestCase):
                 verify_refs.cmd_stats(list(iter_entries(store)), proj,
                                       dict(DEFAULTS), store)
         self.assertNotIn("personal store", out.getvalue())
+
+
+class TestPersonalOnlyStore(unittest.TestCase):
+    """A project may run personal-store-only: `personalStoreDir` set, no team store.
+
+    Bailing on the team store alone used to kill every mode there, while recall
+    and capture kept working — the store looked healthy and its maintenance
+    tooling was silently gone.
+    """
+
+    def _run(self, proj, *argv):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(proj)}), \
+                mock.patch("sys.argv", ["verify_refs.py", *argv]), \
+                contextlib.redirect_stdout(out):
+            rc = verify_refs.main()
+        return rc, out.getvalue()
+
+    def _project(self, with_team_store=False):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        (proj / ".lore.json").write_text(
+            json.dumps({"personalStoreDir": ".lore/personal"}), encoding="utf-8")
+        write_entry(proj / ".lore" / "personal", "prefs/p.md", title="P")
+        if with_team_store:
+            write_entry(proj / "learnings", "x/a.md", title="A")
+        return proj
+
+    def test_default_mode_runs_instead_of_bailing(self):
+        rc, text = self._run(self._project())
+        self.assertEqual(rc, 0)
+        self.assertNotIn("run /lore:init first", text)
+        self.assertIn("nothing to check", text)
+
+    def test_stats_reports_the_personal_entries(self):
+        rc, text = self._run(self._project(), "--stats")
+        self.assertEqual(rc, 0)
+        self.assertIn("personal store: 1 entries", text)
+
+    def test_report_and_dupes_run(self):
+        for flag in ("--report", "--dupes"):
+            with self.subTest(flag=flag):
+                rc, text = self._run(self._project(), flag)
+                self.assertEqual(rc, 0)
+                self.assertNotIn("run /lore:init first", text)
+
+    def test_index_is_a_no_op_without_a_team_store(self):
+        proj = self._project()
+        rc, text = self._run(proj, "--index")
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing to index", text)
+        self.assertFalse((proj / "learnings").exists())
+
+    def test_no_store_at_all_still_bails(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        rc, text = self._run(Path(td.name))
+        self.assertEqual(rc, 0)
+        self.assertIn("run /lore:init first", text)
+
+    def test_populated_team_store_message_unchanged(self):
+        rc, text = self._run(self._project(with_team_store=True))
+        self.assertEqual(rc, 0)
+        self.assertIn("all entries have valid frontmatter file refs", text)
 
 
 @unittest.skipUnless(GIT, "git not available")
