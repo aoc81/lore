@@ -3,7 +3,9 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# This repo's own learnings are local dev notes, not something shipped to users
-# of the plugin. Un-ignoring them turns them into published content — see the
-# security note in learnings/README.md before doing so.
-learnings/
+# Personal lore store (`personalStoreDir` in .lore.json) — per-person notes about
+# developing this plugin, read by recall alongside the team store but never
+# published. `learnings/` is deliberately NOT ignored here: the team store is
+# committed and shared by default, and that default is what users of the plugin
+# get.
+.lore/
