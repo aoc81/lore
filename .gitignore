@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# This repo's own learnings are local dev notes, not something shipped to users
+# of the plugin. Un-ignoring them turns them into published content — see the
+# security note in learnings/README.md before doing so.
+learnings/
