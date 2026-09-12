@@ -1,6 +1,9 @@
 {
   "name": "lore",
-  "displayName": "Lore",
+  "owner": {
+    "name": "Angel",
+    "url": "https://github.com/aoc81"
+  },
   "description": "A self-maintaining lore knowledge store for Claude Code: recall relevant past learnings into context, capture new ones, and keep them fresh.",
   "version": "0.5.0",
   "plugins": [
