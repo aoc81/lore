@@ -142,6 +142,43 @@ class TestFrontmatterValues(unittest.TestCase):
         # Retired entries drive no live guidance and no freshness flags.
         self.assertEqual(self._check(status="superseded", date="someday")[0], 0)
 
+    def test_unparseable_revisit_is_actionable(self):
+        # A revisit date nobody can read is a reminder that never fires.
+        rc, out = self._check(revisit="when the budget allows")
+        self.assertEqual(rc, 1)
+        self.assertIn("revisit 'when the budget allows'", out)
+
+
+class TestRevisitReport(unittest.TestCase):
+    """--report is the re-verify worklist /lore:sweep reads: due revisits too."""
+
+    def _report(self, *specs):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)  # no .git: drift is skipped, revisits are not
+        for rel, status, revisit in specs:
+            write_entry(proj / "learnings", rel, title=rel, status=status,
+                        revisit=revisit)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = verify_refs.cmd_report(
+                list(iter_entries(proj / "learnings")), proj, dict(DEFAULTS))
+        self.assertEqual(rc, 0)
+        return out.getvalue()
+
+    def test_due_live_entries_are_listed(self):
+        out = self._report(("infra/no-backup.md", "current", "2020-01-01"),
+                           ("infra/later.md", "current", "2999-01-01"),
+                           ("infra/old.md", "superseded", "2020-01-01"))
+        self.assertIn("Revisit due", out)
+        self.assertIn("2020-01-01  learnings/infra/no-backup.md", out)
+        self.assertNotIn("later.md", out)
+        self.assertNotIn("old.md", out)
+
+    def test_no_section_when_nothing_is_due(self):
+        self.assertNotIn("Revisit due",
+                         self._report(("a/b.md", "current", "2999-01-01")))
+
 
 class TestIndex(unittest.TestCase):
     def test_writes_grouped_index(self):
@@ -182,6 +219,19 @@ class TestStatsThreshold(unittest.TestCase):
                 verify_refs.cmd_stats(entries, proj,
                                       dict(DEFAULTS, staleAfterMonths=2), store)
             self.assertIn("not verified in >2mo: 1", out.getvalue())
+
+    def test_revisit_due_is_counted(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            write_entry(store, "a/due.md", title="Due", revisit="2020-01-01")
+            write_entry(store, "a/later.md", title="Later",
+                        revisit="2999-01-01")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                verify_refs.cmd_stats(list(iter_entries(store)), proj,
+                                      dict(DEFAULTS), store)
+        self.assertIn("revisit due (temporary decisions): 1", out.getvalue())
 
 
 class TestRecallActivity(unittest.TestCase):

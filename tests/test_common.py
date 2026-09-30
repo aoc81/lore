@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -11,8 +12,8 @@ from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues,
                      find_project_dir, fold, git_dirs, is_under, iter_entries,
                      iter_store_entries, load_config, norm_rel,
                      parse_frontmatter, personal_store, read_frontmatter,
-                     ref_exists, ref_matches, rel_path, stale_after_days,
-                     store_dirs, words)
+                     ref_exists, ref_matches, rel_path, revisit_due,
+                     stale_after_days, store_dirs, words)
 from _util import write_entry
 
 
@@ -69,6 +70,7 @@ class TestParseFrontmatter(unittest.TestCase):
         self.assertEqual(fm["files"], [".github/workflows/ci.yml"])
         self.assertEqual(fm["status"], "current")
         self.assertEqual(fm["verified"], "2026-01-01")
+        self.assertEqual(fm["revisit"], "2026-06-01")
 
 
 class TestLoadConfig(unittest.TestCase):
@@ -272,6 +274,43 @@ class TestIterEntries(unittest.TestCase):
         by_name = {e["path"].name: e for e in entries}
         self.assertEqual(by_name["pager.md"]["title"], "pager")
         self.assertEqual(by_name["cache.md"]["category"], "ci")
+
+    def test_revisit_is_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_entry(td, "infra/no-backup.md", revisit="2026-12-01")
+            write_entry(td, "infra/other.md")
+            got = {e["path"].name: e["revisit"] for e in iter_entries(td)}
+        self.assertEqual(got, {"no-backup.md": "2026-12-01", "other.md": ""})
+
+
+class TestRevisitDue(unittest.TestCase):
+    """`revisit:` -- when a temporary decision ("for now") must be re-checked."""
+
+    TODAY = date(2026, 12, 15)
+
+    def due(self, revisit="", verified=""):
+        return revisit_due({"revisit": revisit, "verified": verified},
+                           self.TODAY)
+
+    def test_unset_or_future_is_not_due(self):
+        self.assertIsNone(self.due())
+        self.assertIsNone(self.due("2027-01-01"))
+
+    def test_date_that_has_come_is_due(self):
+        self.assertEqual(self.due("2026-12-01"), date(2026, 12, 1))
+        self.assertEqual(self.due("2026-12-15"), date(2026, 12, 15))
+
+    def test_reverified_on_or_after_it_is_not_due(self):
+        # Bumping `verified:` after a re-check clears it, as for drift triage.
+        self.assertIsNone(self.due("2026-12-01", verified="2026-12-01"))
+        self.assertIsNone(self.due("2026-12-01", verified="2026-12-10"))
+        self.assertEqual(self.due("2026-12-01", verified="2026-11-30"),
+                         date(2026, 12, 1))
+
+    def test_malformed_dates_are_ignored(self):
+        self.assertIsNone(self.due("soon"))
+        self.assertEqual(self.due("2026-12-01", verified="junk"),
+                         date(2026, 12, 1))
 
 
 class TestReadFrontmatter(unittest.TestCase):

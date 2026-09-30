@@ -101,6 +101,10 @@ doesn't belong in the store.
    ```
    It lists the top existing entries by the same scorer the recall hook uses.
    High overlap with a listed entry → update it in place. Low/none → new file.
+   If what you learned **contradicts** a listed entry — the code or the decision
+   changed ("no backup exists", once a backup does) — never leave both live: set
+   the old one to `status: superseded` with a top banner pointing to the new
+   authority.
 3. **Write one file** — `<storeDir>/<category>/<kebab-slug>.md` (no date in the
    filename), or `<personalStoreDir>/<category>/<slug>.md` for a user preference.
 4. **Scan what you just wrote** — team-store entries only (the personal store is
@@ -137,6 +141,8 @@ files: [path/to/code.ext] # the code this is about; the linter checks these stil
                           # edit-time recall for every file they cover.
 status: current
 verified: YYYY-MM-DD       # optional; set when you confirm the claim against current code
+revisit: YYYY-MM-DD        # optional; for a decision taken "for now" or an accepted risk:
+                          # the date it must be re-decided (recall flags it from then on)
 ---
 ```
 
@@ -153,11 +159,14 @@ verified: YYYY-MM-DD       # optional; set when you confirm the claim against cu
 - Reference code by **stable symbol** (function / class / constant), not line numbers — line numbers rot on the next edit.
 - Keep `files:` complete and accurate — it's the surface the linter checks; code referenced only in prose escapes it.
 - Tags are how recall finds the entry: include the vocabulary a future prompt would use.
+- A claim that something does **not** exist yet ("there is no backup", "no rate limit on `/login`") has no file to point at — point `files:` at where the change would land, as a directory or glob (`infra/`, `.github/workflows/*.yml`). Then edit-time recall shows the entry to whoever adds the thing, and drift triage flags it once they commit. With `files: []` nothing ever re-checks it.
+- A decision that is explicitly temporary ("no backup for now — the owner accepts the risk") gets a `revisit:` date: the day it should be re-decided. From then on recall flags the entry `! revisit due`, and `/lore:lint --report` lists it for `/lore:sweep`.
 
 ## When the code changes later
 
 - Claim still holds, or a fixed bug with prevention documented → leave `status: current` (it's now a regression guard).
 - Referenced code removed or architecture inverted → set `status: superseded`, add a top banner pointing to the new authority, and keep the transferable principle. The recall hook automatically down-ranks and flags superseded entries so they're never read as live guidance.
+- `revisit:` date has come → re-check the claim. Still true → bump `verified:` (that clears the flag) and set a new `revisit:` if it is still temporary. No longer true → supersede it as above.
 
 ## Output
 
