@@ -204,7 +204,8 @@ still won't match an English tag).
 
 ## Configuration
 
-Optional `.lore.json` in your project root:
+Optional `.lore.json` in your project root (hooks and commands find it — or a
+`learnings/` store — from any subdirectory, searching up to the repository root):
 
 ```json
 {

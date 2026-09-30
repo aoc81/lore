@@ -27,13 +27,27 @@ _DAYS_PER_MONTH = 30.44
 
 
 def find_project_dir(data=None):
-    """The user's project root: hook stdin `cwd`, else $CLAUDE_PROJECT_DIR, else cwd."""
+    """The user's project root, searched upward from where the agent is.
+
+    The search starts at the hook stdin `cwd`, else $CLAUDE_PROJECT_DIR, else
+    the process cwd. Hook `cwd` follows the agent's `cd` (and `claude` may be
+    launched from a monorepo package), so the store is not necessarily right
+    there: the nearest directory holding `.lore.json` or a default store wins.
+    The search never leaves the enclosing git repository -- a stray
+    `~/learnings` must not answer for an unrelated project -- and outside any
+    repository only the start itself is checked. Nothing found: the start.
+    """
     if data and data.get("cwd"):
-        return Path(data["cwd"])
-    env = os.environ.get("CLAUDE_PROJECT_DIR")
-    if env:
-        return Path(env)
-    return Path.cwd()
+        start = Path(data["cwd"])
+    else:
+        env = os.environ.get("CLAUDE_PROJECT_DIR")
+        start = Path(env) if env else Path.cwd()
+    chain = [start, *start.parents]
+    top = next((i for i, d in enumerate(chain) if (d / ".git").exists()), 0)
+    for d in chain[:top + 1]:
+        if (d / ".lore.json").is_file() or (d / DEFAULTS["storeDir"]).is_dir():
+            return d
+    return start
 
 
 def _valid(key, value):

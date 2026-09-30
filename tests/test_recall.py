@@ -445,6 +445,18 @@ class TestRunHook(StoreCase):
         self.assertEqual(self.run_hook(
             {"cwd": str(self.project), "prompt": "   "}), "")
 
+    def test_store_found_after_cd_into_a_subdirectory(self):
+        # Hook `cwd` follows the agent's `cd`; recall used to look for the
+        # store only there and went silent for the rest of the session.
+        write_entry(self.store, "ci/cache.md", title="Cache key includes lockfile",
+                    tags=("cache", "lockfile"))
+        (self.project / ".git").mkdir()
+        deep = self.project / "src" / "deep"
+        deep.mkdir(parents=True)
+        ctx = self.context_of(self.run_hook(
+            {"cwd": str(deep), "prompt": "why is the cache stale?"}))
+        self.assertIn("learnings/ci/cache.md - Cache key includes lockfile", ctx)
+
     def test_silent_without_store(self):
         proj = self.project / "empty"
         proj.mkdir()

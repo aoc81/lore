@@ -4,13 +4,15 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _util  # noqa: F401  (puts plugin/scripts on sys.path)
-from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues, fold,
-                     is_under, iter_entries, iter_store_entries, load_config,
-                     norm_rel, parse_frontmatter, personal_store,
-                     read_frontmatter, ref_exists, ref_matches, rel_path,
-                     stale_after_days, store_dirs, words)
+from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues,
+                     find_project_dir, fold, is_under, iter_entries,
+                     iter_store_entries, load_config, norm_rel,
+                     parse_frontmatter, personal_store, read_frontmatter,
+                     ref_exists, ref_matches, rel_path, stale_after_days,
+                     store_dirs, words)
 from _util import write_entry
 
 
@@ -113,6 +115,47 @@ class TestConfigIssues(unittest.TestCase):
         self.assertEqual(self._issues({"maxRecall": 4}), ([], []))
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(config_issues(td), ([], []))
+
+
+class TestFindProjectDir(unittest.TestCase):
+    """Hook `cwd` follows the agent's `cd`, so the store must be searched for."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.root = Path(td.name) / "repo"
+        self.deep = self.root / "src" / "deep"
+        self.deep.mkdir(parents=True)
+
+    def test_store_found_from_a_subdirectory(self):
+        (self.root / ".git").mkdir()
+        (self.root / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.root)
+
+    def test_lore_json_marks_the_root(self):
+        # A custom storeDir is only known from .lore.json, so it is a marker too.
+        (self.root / ".git").mkdir()
+        (self.root / ".lore.json").write_text('{"storeDir": "kb"}',
+                                             encoding="utf-8")
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.root)
+
+    def test_search_stops_at_the_repository_root(self):
+        # A store ABOVE the repo belongs to something else (e.g. ~/learnings).
+        (self.root / ".git").mkdir()
+        (self.root.parent / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.deep)
+
+    def test_outside_a_repository_only_the_start_is_checked(self):
+        (self.root / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.deep)
+        self.assertEqual(find_project_dir({"cwd": str(self.root)}), self.root)
+
+    def test_env_start_is_searched_too(self):
+        (self.root / ".git").mkdir()
+        (self.root / "learnings").mkdir()
+        with mock.patch.dict(os.environ,
+                             {"CLAUDE_PROJECT_DIR": str(self.deep)}):
+            self.assertEqual(find_project_dir(), self.root)
 
 
 class TestTokenizing(unittest.TestCase):
