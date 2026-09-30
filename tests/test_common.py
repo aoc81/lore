@@ -30,6 +30,44 @@ class TestParseFrontmatter(unittest.TestCase):
         self.assertEqual(parse_frontmatter("---\ntags: []\n---\n")["tags"], [])
         self.assertEqual(parse_frontmatter("no frontmatter here"), {})
 
+    def test_trailing_comments_are_dropped(self):
+        # They used to become part of the value: `superseded  # replaced`
+        # was not a stale status, so recall served a dead entry as live.
+        fm = parse_frontmatter(
+            "---\n"
+            "status: superseded   # replaced by the v2 cursor\n"
+            "verified: 2026-01-01     # bump after a re-verify\n"
+            "files: [src/a.py]   # exact path or glob (src/*.py)\n"
+            "tags:   # none yet\n"
+            "---\n")
+        self.assertEqual(fm["status"], "superseded")
+        self.assertEqual(fm["verified"], "2026-01-01")
+        self.assertEqual(fm["files"], ["src/a.py"])
+        self.assertEqual(fm["tags"], [])
+
+    def test_hash_inside_a_value_is_kept(self):
+        fm = parse_frontmatter(
+            "---\n"
+            'title: "Why #1 wins"  # note\n'
+            "category: C#\n"
+            'tags: [a, "b # c"]\n'
+            "files:\n  - src/x.py  # the entry point\n"
+            "---\n")
+        self.assertEqual(fm["title"], "Why #1 wins")
+        self.assertEqual(fm["category"], "C#")
+        self.assertEqual(fm["tags"], ["a", "b # c"])
+        self.assertEqual(fm["files"], ["src/x.py"])
+
+    def test_documented_example_parses_as_documented(self):
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+            encoding="utf-8")
+        example = readme.split("```markdown\n", 1)[1].split("```", 1)[0]
+        fm = parse_frontmatter(example)
+        self.assertEqual(fm["track"], "knowledge")
+        self.assertEqual(fm["files"], [".github/workflows/ci.yml"])
+        self.assertEqual(fm["status"], "current")
+        self.assertEqual(fm["verified"], "2026-01-01")
+
 
 class TestLoadConfig(unittest.TestCase):
     def _cfg(self, payload):

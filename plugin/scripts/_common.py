@@ -195,8 +195,30 @@ def _unquote(s):
     return s
 
 
+def _strip_comment(s):
+    """`s` without a trailing YAML comment: a `#` that opens the value or
+    follows whitespace, outside quotes -- so `C#` and `"see #12"` keep theirs."""
+    if "#" not in s:  # the common case; this runs per line on every prompt
+        return s
+    quote = None
+    for i, c in enumerate(s):
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "\"'" and (i == 0 or s[i - 1] in " \t[,"):
+            quote = c
+        elif c == "#" and (i == 0 or s[i - 1] in " \t"):
+            return s[:i].rstrip()
+    return s
+
+
 def parse_frontmatter(text):
-    """Parse the leading `--- ... ---` YAML-ish block (simple subset). Returns dict."""
+    """Parse the leading `--- ... ---` YAML-ish block (simple subset). Returns dict.
+
+    Trailing `# comments` are dropped as YAML does -- the documented entry
+    format carries them, and a comment kept in the value turned
+    `status: superseded  # ...` into an unknown, i.e. LIVE, status.
+    """
     m = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.S)
     if not m:
         return {}
@@ -207,14 +229,14 @@ def parse_frontmatter(text):
         if not km:
             i += 1
             continue
-        key, rest = km.group(1), km.group(2).strip()
+        key, rest = km.group(1), _strip_comment(km.group(2).strip())
         if rest == "":
             # block list: subsequent `  - item` lines
             vals, j = [], i + 1
             while j < len(lines):
                 lm = re.match(r"^\s*-\s*(.+)$", lines[j])
                 if lm:
-                    vals.append(_unquote(lm.group(1)))
+                    vals.append(_unquote(_strip_comment(lm.group(1))))
                     j += 1
                 else:
                     break
