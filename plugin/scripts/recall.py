@@ -392,6 +392,9 @@ def run_query(text):
         print(_format_entry(e, stale, project, cfg))
     print("\n-> If one is the SAME problem/area, UPDATE it instead of creating a")
     print("   near-duplicate. Only add a new file if none truly overlaps.")
+    print("-> If what you learned contradicts one (the code or the decision")
+    print("   changed), set that entry to status: superseded with a banner")
+    print("   pointing to the new authority -- never leave both live.")
 
 
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch")

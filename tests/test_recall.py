@@ -2,12 +2,14 @@
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _util  # noqa: F401
 from _common import DEFAULTS
@@ -100,6 +102,23 @@ class TestRankMatches(StoreCase):
         cfg = dict(CFG, maxRecall=3)
         m = recall.rank_matches("widget", self.store, cfg)
         self.assertEqual(len(m), 3)
+
+
+class TestRunQuery(StoreCase):
+    """The capture-time overlap check -- where a new learning meets old ones."""
+
+    def test_hint_covers_a_contradicted_entry(self):
+        # "No backup" must not stay live next to a new "nightly backup" entry.
+        write_entry(self.store, "infra/no-backup.md",
+                    title="No database backup exists", tags=("backup",))
+        out = io.StringIO()
+        with mock.patch.dict(os.environ,
+                             {"CLAUDE_PROJECT_DIR": str(self.project)}), \
+                contextlib.redirect_stdout(out):
+            recall.run_query("nightly database backup with pg_dump")
+        self.assertIn("learnings/infra/no-backup.md", out.getvalue())
+        self.assertIn("contradicts", out.getvalue())
+        self.assertIn("superseded", out.getvalue())
 
 
 class TestStopWords(StoreCase):
