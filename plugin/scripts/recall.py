@@ -61,9 +61,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (find_project_dir, fold, is_under,  # noqa: E402
-                     iter_store_entries, load_config, norm_rel, ref_exists,
-                     ref_matches, rel_path, store_dirs, words)
+from _common import (find_project_dir, fold, git_dirs,  # noqa: E402
+                     is_under, iter_store_entries, load_config, norm_rel,
+                     ref_exists, ref_matches, rel_path, store_dirs, words)
 
 # Generic words that would over-match. Domain words are intentionally absent.
 # Entries are diacritic-folded (see _common.fold), so accented fillers are
@@ -267,14 +267,15 @@ def log_recall(project, kind, paths):
     actually opened the file) -- `/lore:stats` compares the two, because an
     entry that surfaces constantly and is never read is noise, not knowledge.
 
-    Best-effort and silent: telemetry must never break the hook. Skipped when
-    `.git` is not a directory (bare repos, worktrees, no git).
+    Best-effort and silent: telemetry must never break the hook. Skipped
+    outside a git checkout. A linked worktree logs to the repository's shared
+    `.git`, so every worktree feeds the same `/lore:stats` numbers.
     """
     try:
-        git_dir = Path(project) / ".git"
-        if not git_dir.is_dir():
+        _git_dir, common = git_dirs(project)
+        if common is None:
             return
-        log = git_dir / "lore-recall.log"
+        log = common / "lore-recall.log"
         today = datetime.date.today().isoformat()
         lines = [f"{today}\t{kind}\t{rel_path(project, p)}\n" for p in paths]
         if log.exists() and log.stat().st_size > _LOG_MAX_BYTES:
@@ -295,8 +296,10 @@ _SEEN_MAX = 400
 
 
 def _seen_file(project):
-    git_dir = Path(project) / ".git"
-    return git_dir / "lore-recall-seen.json" if git_dir.is_dir() else None
+    # The checkout's own git dir (private per worktree), so parallel agents in
+    # separate worktrees never reset each other's dedupe state.
+    git_dir, _common = git_dirs(project)
+    return git_dir / "lore-recall-seen.json" if git_dir else None
 
 
 def unseen_matches(project, session_id, matches):

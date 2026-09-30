@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ import recall
 
 
 CFG = dict(DEFAULTS)
+GIT = shutil.which("git")
 
 
 class StoreCase(unittest.TestCase):
@@ -520,6 +522,47 @@ class TestRunPretool(StoreCase):
         (self.project / ".git" / "lore-recall-seen.json").write_text(
             "{not json", encoding="utf-8")
         self.assertIn("retry loop", self._pretool())
+
+
+@unittest.skipUnless(GIT, "git not available")
+class TestLinkedWorktree(StoreCase):
+    """`git worktree add` checkouts -- how parallel agents usually run.
+
+    `.git` is a FILE there, and dedupe + telemetry used to require a directory:
+    the same learning was re-injected on every edit and nothing was logged.
+    """
+
+    def setUp(self):
+        super().setUp()
+        write_entry(self.store, "a/e.md", title="Watch the retry loop",
+                    files=("src/",))
+        for args in (("init", "-q"), ("add", "."), ("commit", "-q", "-m", "c1")):
+            self._git(*args)
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.wt = Path(td.name) / "wt"
+        self._git("worktree", "add", "-q", str(self.wt))
+
+    def _git(self, *args):
+        subprocess.run([GIT, "-C", str(self.project), "-c", "user.email=t@t",
+                        "-c", "user.name=t", *args],
+                       check=True, capture_output=True)
+
+    def _edit(self):
+        return self.context_of(self.run_hook(
+            {"cwd": str(self.wt), "session_id": "s1", "tool_name": "Edit",
+             "tool_input": {"file_path": str(self.wt / "src" / "a.py")}},
+            ["--pretool"]))
+
+    def test_edit_time_dedupe(self):
+        self.assertIn("retry loop", self._edit())
+        self.assertEqual(self._edit(), "")
+
+    def test_recall_log_lands_in_the_shared_git_dir(self):
+        self._edit()
+        log = self.project / ".git" / "lore-recall.log"
+        self.assertTrue(log.is_file(), "nothing was logged from the worktree")
+        self.assertIn("\tedit\tlearnings/a/e.md", log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

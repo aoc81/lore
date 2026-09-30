@@ -192,6 +192,26 @@ class TestRecallActivity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self.assertIsNone(verify_refs._recall_activity([], Path(td)))
 
+    def test_linked_worktree_reads_the_shared_log(self):
+        # A worktree's `.git` is a file; the hooks log to the shared `.git`.
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        shared = Path(td.name) / "main" / ".git"
+        private = shared / "worktrees" / "wt"
+        private.mkdir(parents=True)
+        (private / "commondir").write_text("../..", encoding="utf-8")
+        (shared / "lore-recall.log").write_text(
+            "2026-07-17\tprompt\tlearnings/x/a.md\n", encoding="utf-8")
+        wt = Path(td.name) / "wt"
+        write_entry(wt / "learnings", "x/a.md", title="A")
+        (wt / ".git").write_text(f"gitdir: {private}", encoding="utf-8")
+        activity = verify_refs._recall_activity(
+            list(iter_entries(wt / "learnings")), wt)
+        self.assertIsNotNone(activity, "the worktree found no recall log")
+        top, never, _unread = activity
+        self.assertEqual(top, [(1, 0, "learnings/x/a.md")])
+        self.assertEqual(never, 0)
+
 
 class TestPersonalStoreStats(unittest.TestCase):
     def test_personal_entries_counted_and_attributed(self):
