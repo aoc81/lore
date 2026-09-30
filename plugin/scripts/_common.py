@@ -27,13 +27,27 @@ _DAYS_PER_MONTH = 30.44
 
 
 def find_project_dir(data=None):
-    """The user's project root: hook stdin `cwd`, else $CLAUDE_PROJECT_DIR, else cwd."""
+    """The user's project root, searched upward from where the agent is.
+
+    The search starts at the hook stdin `cwd`, else $CLAUDE_PROJECT_DIR, else
+    the process cwd. Hook `cwd` follows the agent's `cd` (and `claude` may be
+    launched from a monorepo package), so the store is not necessarily right
+    there: the nearest directory holding `.lore.json` or a default store wins.
+    The search never leaves the enclosing git repository -- a stray
+    `~/learnings` must not answer for an unrelated project -- and outside any
+    repository only the start itself is checked. Nothing found: the start.
+    """
     if data and data.get("cwd"):
-        return Path(data["cwd"])
-    env = os.environ.get("CLAUDE_PROJECT_DIR")
-    if env:
-        return Path(env)
-    return Path.cwd()
+        start = Path(data["cwd"])
+    else:
+        env = os.environ.get("CLAUDE_PROJECT_DIR")
+        start = Path(env) if env else Path.cwd()
+    chain = [start, *start.parents]
+    top = next((i for i, d in enumerate(chain) if (d / ".git").exists()), 0)
+    for d in chain[:top + 1]:
+        if (d / ".lore.json").is_file() or (d / DEFAULTS["storeDir"]).is_dir():
+            return d
+    return start
 
 
 def _valid(key, value):
@@ -165,6 +179,36 @@ def rel_path(project, path):
         return path.relative_to(project).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def git_dirs(project):
+    """`(git_dir, common_dir)` of the checkout at `project`, or (None, None).
+
+    The recall log and the edit-time dedupe state live inside `.git`, where
+    they can never be committed. In a linked worktree (`git worktree add`, how
+    parallel agents usually run) and in a submodule, `.git` is a FILE --
+    `gitdir: <path>` -- naming the checkout's private dir, whose `commondir`
+    points at the repository's shared `.git`. Read from disk rather than via
+    `git rev-parse`: this runs in hooks, on every prompt and every edit.
+    """
+    dot = Path(project) / ".git"
+    if dot.is_dir():
+        return dot, dot
+    try:
+        pointer = dot.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None, None
+    if not pointer.startswith("gitdir:"):
+        return None, None
+    git_dir = Path(project) / pointer[len("gitdir:"):].strip()
+    if not git_dir.is_dir():
+        return None, None
+    try:
+        common = git_dir / (git_dir / "commondir").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        return git_dir, git_dir
+    return git_dir, (common if common.is_dir() else git_dir)
 
 
 # --- text tokenizing (shared by recall and the dupe finder) ------------------

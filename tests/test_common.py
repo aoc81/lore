@@ -4,13 +4,15 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _util  # noqa: F401  (puts plugin/scripts on sys.path)
-from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues, fold,
-                     is_under, iter_entries, iter_store_entries, load_config,
-                     norm_rel, parse_frontmatter, personal_store,
-                     read_frontmatter, ref_exists, ref_matches, rel_path,
-                     stale_after_days, store_dirs, words)
+from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues,
+                     find_project_dir, fold, git_dirs, is_under, iter_entries,
+                     iter_store_entries, load_config, norm_rel,
+                     parse_frontmatter, personal_store, read_frontmatter,
+                     ref_exists, ref_matches, rel_path, stale_after_days,
+                     store_dirs, words)
 from _util import write_entry
 
 
@@ -113,6 +115,95 @@ class TestConfigIssues(unittest.TestCase):
         self.assertEqual(self._issues({"maxRecall": 4}), ([], []))
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(config_issues(td), ([], []))
+
+
+class TestFindProjectDir(unittest.TestCase):
+    """Hook `cwd` follows the agent's `cd`, so the store must be searched for."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.root = Path(td.name) / "repo"
+        self.deep = self.root / "src" / "deep"
+        self.deep.mkdir(parents=True)
+
+    def test_store_found_from_a_subdirectory(self):
+        (self.root / ".git").mkdir()
+        (self.root / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.root)
+
+    def test_lore_json_marks_the_root(self):
+        # A custom storeDir is only known from .lore.json, so it is a marker too.
+        (self.root / ".git").mkdir()
+        (self.root / ".lore.json").write_text('{"storeDir": "kb"}',
+                                             encoding="utf-8")
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.root)
+
+    def test_search_stops_at_the_repository_root(self):
+        # A store ABOVE the repo belongs to something else (e.g. ~/learnings).
+        (self.root / ".git").mkdir()
+        (self.root.parent / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.deep)
+
+    def test_outside_a_repository_only_the_start_is_checked(self):
+        (self.root / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.deep)
+        self.assertEqual(find_project_dir({"cwd": str(self.root)}), self.root)
+
+    def test_env_start_is_searched_too(self):
+        (self.root / ".git").mkdir()
+        (self.root / "learnings").mkdir()
+        with mock.patch.dict(os.environ,
+                             {"CLAUDE_PROJECT_DIR": str(self.deep)}):
+            self.assertEqual(find_project_dir(), self.root)
+
+
+class TestGitDirs(unittest.TestCase):
+    """Where the local-only state lives: `.git` may be a directory or a file."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.base = Path(td.name)
+
+    def test_plain_checkout(self):
+        (self.base / ".git").mkdir()
+        self.assertEqual(git_dirs(self.base), (self.base / ".git",) * 2)
+
+    def test_no_repository(self):
+        self.assertEqual(git_dirs(self.base), (None, None))
+
+    def test_linked_worktree(self):
+        # `git worktree add`: `.git` is a file naming a private dir, whose
+        # `commondir` points back at the repository's shared `.git`.
+        private = self.base / "main" / ".git" / "worktrees" / "wt"
+        private.mkdir(parents=True)
+        (private / "commondir").write_text("../..\n", encoding="utf-8")
+        wt = self.base / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text(f"gitdir: {private}\n", encoding="utf-8")
+        git_dir, common = git_dirs(wt)
+        self.assertEqual(git_dir, private)
+        self.assertEqual(common.resolve(),
+                         (self.base / "main" / ".git").resolve())
+
+    def test_relative_gitdir_without_commondir(self):
+        # A submodule: a relative `gitdir:` and no `commondir`.
+        private = self.base / ".git" / "modules" / "sub"
+        private.mkdir(parents=True)
+        sub = self.base / "sub"
+        sub.mkdir()
+        (sub / ".git").write_text("gitdir: ../.git/modules/sub\n",
+                                  encoding="utf-8")
+        git_dir, common = git_dirs(sub)
+        self.assertEqual(git_dir.resolve(), private.resolve())
+        self.assertEqual(common, git_dir)
+
+    def test_bad_pointer_is_no_repository(self):
+        (self.base / ".git").write_text("garbage", encoding="utf-8")
+        self.assertEqual(git_dirs(self.base), (None, None))
+        (self.base / ".git").write_text("gitdir: missing", encoding="utf-8")
+        self.assertEqual(git_dirs(self.base), (None, None))
 
 
 class TestTokenizing(unittest.TestCase):

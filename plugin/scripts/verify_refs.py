@@ -41,9 +41,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (DEFAULTS, config_issues, find_project_dir,  # noqa: E402
-                     iter_entries, load_config, norm_rel, personal_store,
-                     ref_exists, ref_matches, rel_path, stale_after_days,
-                     words)
+                     git_dirs, iter_entries, load_config, norm_rel,
+                     personal_store, ref_exists, ref_matches, rel_path,
+                     stale_after_days, words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -387,11 +387,13 @@ def _recall_activity(entries, project):
     The `read` events come from the PostToolUse hook, so an install that
     predates it (or a target with no Read tool, e.g. Codex) has none -- and then
     "never read" would be vacuously true for every entry, which is why `unread`
-    is None rather than a full list. The log is local, inside `.git`, never
-    committed. Absent log -> None (no git, or nothing has surfaced yet).
+    is None rather than a full list. The log is local, inside `.git` (the
+    shared one, from a linked worktree), never committed. Absent log -> None
+    (no git, or nothing has surfaced yet).
     """
-    log = project / ".git" / "lore-recall.log"
-    if not log.is_file():
+    _git_dir, common = git_dirs(project)
+    log = common / "lore-recall.log" if common else None
+    if log is None or not log.is_file():
         return None
     surfaced, reads = {}, {}
     try:
