@@ -334,6 +334,62 @@ class TestPersonalOnlyStore(unittest.TestCase):
 
 
 @unittest.skipUnless(GIT, "git not available")
+class TestPersonalStorePublication(unittest.TestCase):
+    """An in-repo personal store stays private only while git ignores it."""
+
+    def _git(self, proj, *args):
+        subprocess.run(
+            [GIT, "-C", str(proj), "-c", "user.email=t@t", "-c",
+             "user.name=t", *args],
+            check=True, capture_output=True)
+
+    def _project(self, gitignore=""):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        self._git(proj, "init", "-q")
+        write_entry(proj / "notes", "prefs/diff.md", title="Show the diff first")
+        if gitignore:
+            (proj / ".gitignore").write_text(gitignore, encoding="utf-8")
+        return proj
+
+    def _warn(self, proj, personal="notes"):
+        return verify_refs.personal_store_warning(
+            proj, dict(DEFAULTS, personalStoreDir=personal))
+
+    def test_unignored_store_is_flagged(self):
+        self.assertIn("not gitignored", self._warn(self._project()) or "")
+
+    def test_ignored_store_is_silent(self):
+        self.assertIsNone(self._warn(self._project(gitignore="notes/\n")))
+
+    def test_committed_store_is_flagged_even_once_ignored(self):
+        proj = self._project(gitignore="notes/\n")
+        self._git(proj, "add", "-f", "notes")
+        self._git(proj, "commit", "-q", "-m", "oops")
+        self.assertIn("committed", self._warn(proj) or "")
+
+    def test_store_outside_the_repository_is_not_checked(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        self.assertIsNone(self._warn(self._project(), personal=outside.name))
+
+    def test_lint_and_stats_print_it(self):
+        proj = self._project()
+        (proj / ".lore.json").write_text(
+            json.dumps({"personalStoreDir": "notes"}), encoding="utf-8")
+        for argv in ([], ["--stats"]):
+            out = io.StringIO()
+            with self.subTest(argv=argv), \
+                    mock.patch.dict(os.environ,
+                                    {"CLAUDE_PROJECT_DIR": str(proj)}), \
+                    mock.patch("sys.argv", ["verify_refs.py", *argv]), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(verify_refs.main(), 0)
+                self.assertIn("personalStoreDir 'notes'", out.getvalue())
+
+
+@unittest.skipUnless(GIT, "git not available")
 class TestGitDrift(unittest.TestCase):
     def _git(self, proj, *args):
         subprocess.run(

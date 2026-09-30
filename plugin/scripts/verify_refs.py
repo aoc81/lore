@@ -124,6 +124,44 @@ def config_warning(project):
     return "note: .lore.json -- ignored: " + "; ".join(bits) + "."
 
 
+def personal_store_warning(project, cfg):
+    """Warn when git would publish the PRIVATE store, or None.
+
+    A `personalStoreDir` inside the repository (`.lore/personal`) is private
+    only while .gitignore covers it, and /lore:init adds that rule only when
+    it creates the directory: a hand-set key, or a rule removed later, leaves
+    someone's working preferences one `git add -A` away from a PR. Nothing
+    else would say so -- the personal store is never secret-scanned or
+    linted, because it is supposed to never be pushed.
+    """
+    store = personal_store(project, cfg)
+    if store is None or not store.is_dir():
+        return None
+    rel = rel_path(project, store)
+    if Path(rel).is_absolute():
+        return None  # outside the repository: git never sees it
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(project), "ls-files", "--", rel],
+            capture_output=True, text=True, timeout=15)
+        ignored = subprocess.run(
+            ["git", "-C", str(project), "check-ignore", "-q", rel],
+            capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if tracked.returncode != 0 or ignored.returncode not in (0, 1):
+        return None  # not a git repository, or git failed: nothing to say
+    if tracked.stdout.strip():
+        return (f"warning: personalStoreDir '{rel}' has files committed to "
+                f"git -- they are published. `git rm -r --cached {rel}`, then "
+                f"add '{rel}/' to .gitignore.")
+    if ignored.returncode == 1:
+        return (f"warning: personalStoreDir '{rel}' is inside the repository "
+                f"and not gitignored -- `git add -A` would publish it. Add "
+                f"'{rel}/' to .gitignore.")
+    return None
+
+
 # --- default mode: file-ref existence + frontmatter value check --------------
 
 def _value_problems(e, cfg):
@@ -161,7 +199,8 @@ def cmd_check(entries, project, cfg, strict):
                 issues.append((e, f"referenced file no longer exists: {ref}",
                                actionable))
                 missing_refs = True
-    notes = [n for n in (config_warning(project), version_warning(project)) if n]
+    notes = [n for n in (config_warning(project), version_warning(project),
+                         personal_store_warning(project, cfg)) if n]
     if not issues:
         if entries:
             print("OK  learnings: all entries have valid frontmatter file refs.")
@@ -536,7 +575,8 @@ def cmd_stats(entries, project, cfg, store):
     tail = "   -> verify_refs.py --dupes" if dupes else ""
     print(f"  near-duplicate pairs (title/tag overlap): {dupes}{tail}")
     print(f"  links: dangling [[refs]] (soft; forward-refs ok): {len(dangling)}")
-    for n in (config_warning(project), version_warning(project)):
+    for n in (config_warning(project), version_warning(project),
+              personal_store_warning(project, cfg)):
         if n:
             print(f"\n  {n}")
     return 0

@@ -269,6 +269,9 @@ instead of the shared store):
 ```
 
 `/lore:stats` counts personal entries so a two-store setup never looks half-empty.
+A personal store **inside** the repo is private only while `.gitignore` covers it:
+`/lore:lint` and `/lore:stats` warn when git would publish it (not ignored, or
+files already committed).
 To make the **whole** store private instead, just add your store directory (e.g.
 `learnings/`) to `.gitignore`.
 
