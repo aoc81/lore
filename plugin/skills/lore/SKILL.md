@@ -95,7 +95,7 @@ doesn't belong in the store.
    UPDATE an existing entry instead of duplicating it:
    ```sh
    PY=$(command -v python3 || command -v python || command -v py)
-   R="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/scripts/}recall.py"
+   R="${CLAUDE_PLUGIN_ROOT}/scripts/recall.py"
    [ -f "$R" ] || R="$HOME/.codex/lore/recall.py"   # Codex install location
    "$PY" "$R" --query "<draft title + tags>"
    ```
@@ -109,7 +109,7 @@ doesn't belong in the store.
    so a leak is caught at write time, not at push time:
    ```sh
    PY=$(command -v python3 || command -v python || command -v py)
-   S="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/scripts/}scan_secrets.py"
+   S="${CLAUDE_PLUGIN_ROOT}/scripts/scan_secrets.py"
    [ -f "$S" ] || S="$HOME/.codex/lore/scan_secrets.py"   # Codex install location
    "$PY" "$S" <path-to-the-file-you-wrote>
    ```
