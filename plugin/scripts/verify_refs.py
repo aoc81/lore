@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (DEFAULTS, config_issues, find_project_dir,  # noqa: E402
                      git_dirs, iter_entries, load_config, norm_rel,
                      personal_store, ref_exists, ref_matches, rel_path,
-                     stale_after_days, words)
+                     revisit_due, stale_after_days, words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -169,15 +169,16 @@ def _value_problems(e, cfg):
 
     A `status:` that is neither `current` nor a stale status is served by
     recall as LIVE guidance -- a typo'd `superseeded` resurrects a retired
-    entry. A `date:`/`verified:` that is not YYYY-MM-DD switches off the
-    entry's freshness signals (age flag, drift triage) without a word.
+    entry. A `date:`/`verified:`/`revisit:` that is not YYYY-MM-DD switches
+    off the entry's freshness signals (age flag, drift triage, the revisit
+    reminder) without a word.
     """
     problems = []
     known = ["current"] + list(cfg["staleStatuses"])
     if e["status"] not in known:
         problems.append(f"unknown status '{e['status']}' -- recall reads it as "
                         f"current; use one of: {', '.join(known)}")
-    for key in ("date", "verified"):
+    for key in ("date", "verified", "revisit"):
         value = e[key]
         if value and not (_DATE_LINE.match(value) and _parse_date(value)):
             problems.append(f"{key} '{value}' is not a YYYY-MM-DD date -- "
@@ -344,6 +345,33 @@ def _drift_candidates(entries, project, stale_set):
 
 
 def cmd_report(entries, project, cfg):
+    """The re-verify worklist /lore:sweep reads: drift, then due revisits."""
+    _drift_report(entries, project, cfg)
+    _revisit_report(entries, project, cfg)
+    return 0
+
+
+def _revisit_report(entries, project, cfg):
+    """Live entries whose `revisit:` date has come -- temporary decisions.
+
+    Silent when none are due: most stores never use `revisit:`.
+    """
+    stale_set = set(cfg["staleStatuses"])
+    due = []
+    for e in entries:
+        d = revisit_due(e) if e["status"] not in stale_set else None
+        if d:
+            due.append((d, e["path"].relative_to(project).as_posix()))
+    if not due:
+        return
+    print("\nRevisit due -- temporary decisions whose re-check date has come:")
+    for d, rel in sorted(due):
+        print(f"  {d}  {rel}")
+    print("\n  -> Re-check the claim. Still true: bump 'verified:' (and set a new")
+    print("     'revisit:' if it is still temporary). No longer true: supersede it.")
+
+
+def _drift_report(entries, project, cfg):
     if not (project / ".git").exists():
         print("Drift triage: skipped (not a git repository).")
         return 0
@@ -506,7 +534,7 @@ def cmd_stats(entries, project, cfg, store):
     stale_set = set(cfg["staleStatuses"])
     stale_days = stale_after_days(cfg)
     by_status, by_cat = {}, {}
-    deleted_refs = unverified_old = 0
+    deleted_refs = unverified_old = revisits = 0
     oldest = None
     for e in entries:
         st = e["status"] or "current"
@@ -515,6 +543,8 @@ def cmd_stats(entries, project, cfg, store):
         if e["status"] not in stale_set and any(
                 f and not ref_exists(project, f) for f in e["files"]):
             deleted_refs += 1
+        if e["status"] not in stale_set and revisit_due(e):
+            revisits += 1
         age = _age_days(e["verified"] or e["date"])
         if age is not None:
             if age >= stale_days:
@@ -545,6 +575,8 @@ def cmd_stats(entries, project, cfg, store):
     else:
         tail = "   -> verify_refs.py --report" if drift else ""
         print(f"    drift backlog (code changed since verified): {drift}{tail}")
+    tail = "   -> verify_refs.py --report" if revisits else ""
+    print(f"    revisit due (temporary decisions): {revisits}{tail}")
     print(f"    not verified in >{months}mo: {unverified_old}")
     if oldest:
         rel = oldest[1]["path"].relative_to(project).as_posix()

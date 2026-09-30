@@ -106,8 +106,9 @@ language) tokenizes correctly and "autenticación" matches a tag written `autent
 common English **and** Spanish filler words are ignored, and you can add your own with
 `stopWords` in `.lore.json`.
 Superseded entries are down-ranked and tagged so they're never mistaken for live guidance,
-and each match carries cheap freshness flags (a deleted-file ref, or "verified N months
-ago") so a possibly-stale learning is never trusted blindly. A `PreToolUse` hook adds
+and each match carries cheap freshness flags (a deleted-file ref, "verified N months
+ago", or a `revisit:` date that has come) so a possibly-stale learning is never trusted
+blindly. A `PreToolUse` hook adds
 **edit-time recall**: when the agent is about to edit a file, any learning whose `files:`
 covers that path — exact, a directory prefix (`src/auth/`), or a glob (`src/auth/*.py`) —
 surfaces right then, so the gotcha shows up exactly when you touch the code (live entries
@@ -146,7 +147,8 @@ real entries from — under the same gate as any other capture, evidence read fr
 that each entry's `files:` still exist and that its `status:` and dates are values the
 hooks can read (a typo'd `superseeded` would be served as live guidance); `--report` ranks entries whose referenced code
 changed since they were last `verified:` (your re-verify worklist — computed in a single
-streaming `git log` pass, not one subprocess per file); `--dupes` finds near-duplicate
+streaming `git log` pass, not one subprocess per file), plus temporary decisions whose
+`revisit:` date has come; `--dupes` finds near-duplicate
 entry pairs (e.g. two teammates capturing the same gotcha on parallel branches) and
 category-name variants; `--index` regenerates the store's README. `/lore:stats` prints a
 store-health snapshot (counts by status/category, the drift backlog, long-unverified
@@ -191,6 +193,7 @@ tags: [ci, cache, lockfile]
 files: [.github/workflows/ci.yml]   # exact path, dir prefix (src/auth/), or glob (src/*.py)
 status: current         # or: superseded / obsolete
 verified: 2026-01-01     # optional; bump after a re-verify to clear it from drift triage
+revisit: 2026-06-01      # optional; a decision taken "for now": when to re-decide it
 ---
 ```
 
@@ -201,7 +204,11 @@ Body — **knowledge**: Context · Guidance · Why This Matters · When To Apply
 numbers; keep `files:` complete (it's the linter's surface); make tags the words a
 future prompt would use — **in the language you actually prompt in** (recall folds
 accents, so `autenticación` and `autenticacion` match either way, but a Spanish prompt
-still won't match an English tag).
+still won't match an English tag). A claim that something does **not** exist yet ("there
+is no backup") has no file to point at: anchor `files:` where the change would land
+(`infra/`, a glob) so edit-time recall and drift triage can see it, and give a decision
+taken *for now* a `revisit:` date. When a new learning contradicts an old one, the old
+one becomes `superseded` — never leave both live.
 
 ## Configuration
 

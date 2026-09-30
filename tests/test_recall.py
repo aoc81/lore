@@ -213,6 +213,16 @@ class TestFreshnessFlags(StoreCase):
         self.assertTrue(any("mo ago" in f for f in
                             recall.freshness_flags(e, self.project, cfg)))
 
+    def test_revisit_due_is_flagged_on_live_entries_only(self):
+        def revisit_flags(revisit, status="current"):
+            e = dict(self._entry(status=status), revisit=revisit)
+            return [f for f in recall.freshness_flags(e, self.project, CFG)
+                    if "revisit" in f]
+        self.assertEqual(revisit_flags("2020-01-01"),
+                         ["! revisit due since 2020-01-01"])
+        self.assertEqual(revisit_flags("2999-01-01"), [])
+        self.assertEqual(revisit_flags("2020-01-01", status="superseded"), [])
+
 
 class TestFormatEntry(StoreCase):
     def test_long_title_is_truncated_and_flattened(self):
@@ -458,6 +468,16 @@ class TestRunHook(StoreCase):
         log = (self.project / ".git" / "lore-recall.log").read_text(
             encoding="utf-8")
         self.assertIn("\tprompt\tlearnings/ci/cache.md", log)
+
+    def test_temporary_decision_past_its_revisit_date_is_marked(self):
+        write_entry(self.store, "infra/no-backup.md",
+                    title="No database backup; owner accepts the risk for now",
+                    tags=("backup", "database"), revisit="2020-01-01")
+        ctx = self.context_of(self.run_hook(
+            {"cwd": str(self.project),
+             "prompt": "do we have a database backup?"}))
+        self.assertIn("learnings/infra/no-backup.md", ctx)
+        self.assertIn("! revisit due since 2020-01-01", ctx)
 
     def test_silent_without_match_or_prompt(self):
         write_entry(self.store, "ci/cache.md", title="Cache key", tags=("cache",))

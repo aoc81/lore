@@ -1,4 +1,5 @@
 """Shared helpers for the lore hooks and scripts (stdlib only)."""
+import datetime
 import fnmatch
 import json
 import os
@@ -112,6 +113,29 @@ def config_issues(project):
 def stale_after_days(cfg):
     """The freshness threshold in days (the linter's unit; recall uses months)."""
     return int(round(cfg["staleAfterMonths"] * _DAYS_PER_MONTH))
+
+
+def revisit_due(e, today=None):
+    """The entry's `revisit:` date once it has come, else None.
+
+    `revisit:` dates a temporary decision or an accepted risk ("no backup, for
+    now") -- a claim true today that someone has promised to re-decide. It is
+    due from that date until the claim is re-verified on or after it, so
+    bumping `verified:` clears it exactly as it clears drift triage. Callers
+    skip retired entries: their revisit no longer means anything.
+    """
+    try:
+        due = datetime.date.fromisoformat(str(e.get("revisit") or ""))
+    except ValueError:
+        return None
+    if due > (today or datetime.date.today()):
+        return None
+    try:
+        if datetime.date.fromisoformat(str(e.get("verified") or "")) >= due:
+            return None
+    except ValueError:
+        pass
+    return due
 
 
 # --- the two stores: team (committed) + personal (private) --------------------
@@ -353,6 +377,7 @@ def iter_entries(store, personal=False):
             "status": str(fm.get("status") or "current").lower(),
             "date": str(fm.get("date") or ""),
             "verified": str(fm.get("verified") or ""),
+            "revisit": str(fm.get("revisit") or ""),
             "category": str(fm.get("category") or p.parent.name),
             "personal": personal,
         }

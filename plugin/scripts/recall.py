@@ -63,7 +63,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (find_project_dir, fold, git_dirs,  # noqa: E402
                      is_under, iter_store_entries, load_config, norm_rel,
-                     ref_exists, ref_matches, rel_path, store_dirs, words)
+                     ref_exists, ref_matches, rel_path, revisit_due,
+                     store_dirs, words)
 
 # Generic words that would over-match. Domain words are intentionally absent.
 # Entries are diacritic-folded (see _common.fold), so accented fillers are
@@ -126,6 +127,8 @@ def freshness_flags(e, project, cfg):
       stale signal (the claim's anchor is gone) -> flag it.
     - An entry not verified in >= `staleAfterMonths` shows its age, so it is
       not trusted blindly. `date:` is the stamp when `verified:` is absent.
+    - A live entry whose `revisit:` date has come (a decision taken "for
+      now") is flagged: it was true when written and may no longer be.
 
     Both thresholds come from `cfg`, so a project that redefines
     `staleStatuses` or `staleAfterMonths` gets the same answer everywhere.
@@ -137,6 +140,10 @@ def freshness_flags(e, project, cfg):
     checkable = not e.get("personal") or is_under(project, e["path"])
     if checkable and _refs_a_deleted_file(e, project, cfg):
         flags.append("! refs a deleted file")
+    due = (revisit_due(e) if e["status"] not in set(cfg["staleStatuses"])
+           else None)
+    if due:
+        flags.append(f"! revisit due since {due.isoformat()}")
     stamp = e["verified"] or e["date"]
     months = _months_since(stamp) if stamp else None
     if months is not None and months >= cfg["staleAfterMonths"]:
