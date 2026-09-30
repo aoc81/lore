@@ -14,8 +14,9 @@ PY=$(command -v python3 || command -v python || command -v py)
 "$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/verify_refs.py" $ARGUMENTS
 ```
 
-Modes: no args = file-reference existence check (plus a note about any `.lore.json`
-keys the hooks ignore — typos, wrong types) · `--report` = git drift triage
+Modes: no args = file-reference existence check, plus `status:`/`date:`/`verified:`
+values the hooks would misread (a typo'd status is served as live guidance), plus a
+note about any `.lore.json` keys the hooks ignore — typos, wrong types · `--report` = git drift triage
 (entries whose code changed since they were verified) · `--dupes` = near-duplicate
 triage (entry pairs with overlapping title/tags, e.g. parallel captures from
 teammates, plus category-name variants) · `--index` = regenerate the store README ·

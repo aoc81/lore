@@ -103,6 +103,46 @@ class TestConfigWarning(unittest.TestCase):
             self.assertIsNone(verify_refs.config_warning(Path(td)))
 
 
+class TestFrontmatterValues(unittest.TestCase):
+    """Values the hooks silently misread: a typo'd status, a non-ISO date."""
+
+    def _check(self, cfg=None, **entry):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        write_entry(proj / "learnings", "x/e.md", title="E", **entry)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = verify_refs.cmd_check(list(iter_entries(proj / "learnings")),
+                                       proj, cfg or dict(DEFAULTS), True)
+        return rc, out.getvalue()
+
+    def test_typoed_status_is_actionable(self):
+        # Not a stale status, so recall serves the entry as LIVE guidance.
+        rc, out = self._check(status="superseeded")
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown status 'superseeded'", out)
+
+    def test_unparseable_dates_are_actionable(self):
+        rc, out = self._check(date="last week", verified="2026-02-30")
+        self.assertEqual(rc, 1)
+        self.assertIn("date 'last week'", out)
+        self.assertIn("verified '2026-02-30'", out)
+
+    def test_valid_values_are_clean(self):
+        rc, out = self._check(date="2026-01-01", verified="2026-02-01")
+        self.assertEqual(rc, 0)
+        self.assertIn("OK", out)
+
+    def test_configured_stale_status_is_valid(self):
+        cfg = dict(DEFAULTS, staleStatuses=["archived"])
+        self.assertEqual(self._check(cfg=cfg, status="archived")[0], 0)
+
+    def test_stale_entries_are_not_value_checked(self):
+        # Retired entries drive no live guidance and no freshness flags.
+        self.assertEqual(self._check(status="superseded", date="someday")[0], 0)
+
+
 class TestIndex(unittest.TestCase):
     def test_writes_grouped_index(self):
         with tempfile.TemporaryDirectory() as td:
@@ -311,6 +351,62 @@ class TestPersonalOnlyStore(unittest.TestCase):
         rc, text = self._run(self._project(with_team_store=True))
         self.assertEqual(rc, 0)
         self.assertIn("all entries have valid frontmatter file refs", text)
+
+
+@unittest.skipUnless(GIT, "git not available")
+class TestPersonalStorePublication(unittest.TestCase):
+    """An in-repo personal store stays private only while git ignores it."""
+
+    def _git(self, proj, *args):
+        subprocess.run(
+            [GIT, "-C", str(proj), "-c", "user.email=t@t", "-c",
+             "user.name=t", *args],
+            check=True, capture_output=True)
+
+    def _project(self, gitignore=""):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        self._git(proj, "init", "-q")
+        write_entry(proj / "notes", "prefs/diff.md", title="Show the diff first")
+        if gitignore:
+            (proj / ".gitignore").write_text(gitignore, encoding="utf-8")
+        return proj
+
+    def _warn(self, proj, personal="notes"):
+        return verify_refs.personal_store_warning(
+            proj, dict(DEFAULTS, personalStoreDir=personal))
+
+    def test_unignored_store_is_flagged(self):
+        self.assertIn("not gitignored", self._warn(self._project()) or "")
+
+    def test_ignored_store_is_silent(self):
+        self.assertIsNone(self._warn(self._project(gitignore="notes/\n")))
+
+    def test_committed_store_is_flagged_even_once_ignored(self):
+        proj = self._project(gitignore="notes/\n")
+        self._git(proj, "add", "-f", "notes")
+        self._git(proj, "commit", "-q", "-m", "oops")
+        self.assertIn("committed", self._warn(proj) or "")
+
+    def test_store_outside_the_repository_is_not_checked(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        self.assertIsNone(self._warn(self._project(), personal=outside.name))
+
+    def test_lint_and_stats_print_it(self):
+        proj = self._project()
+        (proj / ".lore.json").write_text(
+            json.dumps({"personalStoreDir": "notes"}), encoding="utf-8")
+        for argv in ([], ["--stats"]):
+            out = io.StringIO()
+            with self.subTest(argv=argv), \
+                    mock.patch.dict(os.environ,
+                                    {"CLAUDE_PROJECT_DIR": str(proj)}), \
+                    mock.patch("sys.argv", ["verify_refs.py", *argv]), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(verify_refs.main(), 0)
+                self.assertIn("personalStoreDir 'notes'", out.getvalue())
 
 
 @unittest.skipUnless(GIT, "git not available")

@@ -3,11 +3,12 @@
 
 Modes:
   (default)   Existence check -- flag entries whose frontmatter `files:` paths no
-              longer exist. `--strict` exits 1 on ACTIONABLE issues (a missing
-              file on a non-stale entry; missing files on superseded entries are
-              expected/informational). Also reports `.lore.json` keys the hooks
-              silently ignore (a typo like `maxRecal`), which is invisible at
-              hook time by design.
+              longer exist, and live entries whose `status:`/`date:`/`verified:`
+              the hooks would misread. `--strict` exits 1 on ACTIONABLE issues (a
+              missing file or a bad value on a non-stale entry; missing files on
+              superseded entries are expected/informational). Also reports
+              `.lore.json` keys the hooks silently ignore (a typo like
+              `maxRecal`), which is invisible at hook time by design.
   --report    Drift triage -- for each current entry, use `git log` to find
               referenced files changed AFTER the entry's `verified:` (or `date:`)
               baseline, ranked by gap. Best candidates for a re-verify. Heuristic.
@@ -123,17 +124,83 @@ def config_warning(project):
     return "note: .lore.json -- ignored: " + "; ".join(bits) + "."
 
 
-# --- default mode: file-ref existence check ----------------------------------
+def personal_store_warning(project, cfg):
+    """Warn when git would publish the PRIVATE store, or None.
+
+    A `personalStoreDir` inside the repository (`.lore/personal`) is private
+    only while .gitignore covers it, and /lore:init adds that rule only when
+    it creates the directory: a hand-set key, or a rule removed later, leaves
+    someone's working preferences one `git add -A` away from a PR. Nothing
+    else would say so -- the personal store is never secret-scanned or
+    linted, because it is supposed to never be pushed.
+    """
+    store = personal_store(project, cfg)
+    if store is None or not store.is_dir():
+        return None
+    rel = rel_path(project, store)
+    if Path(rel).is_absolute():
+        return None  # outside the repository: git never sees it
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(project), "ls-files", "--", rel],
+            capture_output=True, text=True, timeout=15)
+        ignored = subprocess.run(
+            ["git", "-C", str(project), "check-ignore", "-q", rel],
+            capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if tracked.returncode != 0 or ignored.returncode not in (0, 1):
+        return None  # not a git repository, or git failed: nothing to say
+    if tracked.stdout.strip():
+        return (f"warning: personalStoreDir '{rel}' has files committed to "
+                f"git -- they are published. `git rm -r --cached {rel}`, then "
+                f"add '{rel}/' to .gitignore.")
+    if ignored.returncode == 1:
+        return (f"warning: personalStoreDir '{rel}' is inside the repository "
+                f"and not gitignored -- `git add -A` would publish it. Add "
+                f"'{rel}/' to .gitignore.")
+    return None
+
+
+# --- default mode: file-ref existence + frontmatter value check --------------
+
+def _value_problems(e, cfg):
+    """Frontmatter values the hooks silently misread, as messages.
+
+    A `status:` that is neither `current` nor a stale status is served by
+    recall as LIVE guidance -- a typo'd `superseeded` resurrects a retired
+    entry. A `date:`/`verified:` that is not YYYY-MM-DD switches off the
+    entry's freshness signals (age flag, drift triage) without a word.
+    """
+    problems = []
+    known = ["current"] + list(cfg["staleStatuses"])
+    if e["status"] not in known:
+        problems.append(f"unknown status '{e['status']}' -- recall reads it as "
+                        f"current; use one of: {', '.join(known)}")
+    for key in ("date", "verified"):
+        value = e[key]
+        if value and not (_DATE_LINE.match(value) and _parse_date(value)):
+            problems.append(f"{key} '{value}' is not a YYYY-MM-DD date -- "
+                            "freshness checks skip it")
+    return problems
+
 
 def cmd_check(entries, project, cfg, strict):
     stale_set = set(cfg["staleStatuses"])
-    issues = []
+    issues, bad_values, missing_refs = [], False, False
     for e in entries:
         actionable = e["status"] not in stale_set
+        if actionable:  # retired entries drive no guidance and no freshness
+            for problem in _value_problems(e, cfg):
+                issues.append((e, problem, True))
+                bad_values = True
         for ref in e["files"]:
             if ref and not ref_exists(project, ref):
-                issues.append((e, ref, actionable))
-    notes = [n for n in (config_warning(project), version_warning(project)) if n]
+                issues.append((e, f"referenced file no longer exists: {ref}",
+                               actionable))
+                missing_refs = True
+    notes = [n for n in (config_warning(project), version_warning(project),
+                         personal_store_warning(project, cfg)) if n]
     if not issues:
         if entries:
             print("OK  learnings: all entries have valid frontmatter file refs.")
@@ -148,17 +215,21 @@ def cmd_check(entries, project, cfg, strict):
             print(f"  {n}")
         return 0
     actionable = [i for i in issues if i[2]]
-    print(f"\nlearnings file-ref check: {len(issues)} issue(s), {len(actionable)} actionable:")
+    print(f"\nlearnings check: {len(issues)} issue(s), {len(actionable)} actionable:")
     cur = None
-    for e, ref, act in issues:
+    for e, problem, act in issues:
         rel = e["path"].relative_to(project).as_posix()
         if rel != cur:
             print(f"\n  {rel} [status: {e['status'] or 'current'}]")
             cur = rel
         note = "" if act else f"  (expected -- entry is {e['status']})"
-        print(f"    - referenced file no longer exists: {ref}{note}")
-    print("\n  -> A 'current' entry with a missing file is likely STALE: fix the path,")
-    print("     mark status: superseded, or re-verify the claim against the code.")
+        print(f"    - {problem}{note}")
+    if missing_refs:
+        print("\n  -> A 'current' entry with a missing file is likely STALE: fix the path,")
+        print("     mark status: superseded, or re-verify the claim against the code.")
+    if bad_values:
+        print("\n  -> Fix the value: a typo'd status is served as live guidance, and a")
+        print("     malformed date silently turns off the entry's freshness checks.")
     for n in notes:
         print(f"  {n}")
     return 1 if (strict and actionable) else 0
@@ -506,7 +577,8 @@ def cmd_stats(entries, project, cfg, store):
     tail = "   -> verify_refs.py --dupes" if dupes else ""
     print(f"  near-duplicate pairs (title/tag overlap): {dupes}{tail}")
     print(f"  links: dangling [[refs]] (soft; forward-refs ok): {len(dangling)}")
-    for n in (config_warning(project), version_warning(project)):
+    for n in (config_warning(project), version_warning(project),
+              personal_store_warning(project, cfg)):
         if n:
             print(f"\n  {n}")
     return 0
