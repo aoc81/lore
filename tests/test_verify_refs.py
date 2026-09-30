@@ -103,6 +103,46 @@ class TestConfigWarning(unittest.TestCase):
             self.assertIsNone(verify_refs.config_warning(Path(td)))
 
 
+class TestFrontmatterValues(unittest.TestCase):
+    """Values the hooks silently misread: a typo'd status, a non-ISO date."""
+
+    def _check(self, cfg=None, **entry):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        write_entry(proj / "learnings", "x/e.md", title="E", **entry)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = verify_refs.cmd_check(list(iter_entries(proj / "learnings")),
+                                       proj, cfg or dict(DEFAULTS), True)
+        return rc, out.getvalue()
+
+    def test_typoed_status_is_actionable(self):
+        # Not a stale status, so recall serves the entry as LIVE guidance.
+        rc, out = self._check(status="superseeded")
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown status 'superseeded'", out)
+
+    def test_unparseable_dates_are_actionable(self):
+        rc, out = self._check(date="last week", verified="2026-02-30")
+        self.assertEqual(rc, 1)
+        self.assertIn("date 'last week'", out)
+        self.assertIn("verified '2026-02-30'", out)
+
+    def test_valid_values_are_clean(self):
+        rc, out = self._check(date="2026-01-01", verified="2026-02-01")
+        self.assertEqual(rc, 0)
+        self.assertIn("OK", out)
+
+    def test_configured_stale_status_is_valid(self):
+        cfg = dict(DEFAULTS, staleStatuses=["archived"])
+        self.assertEqual(self._check(cfg=cfg, status="archived")[0], 0)
+
+    def test_stale_entries_are_not_value_checked(self):
+        # Retired entries drive no live guidance and no freshness flags.
+        self.assertEqual(self._check(status="superseded", date="someday")[0], 0)
+
+
 class TestIndex(unittest.TestCase):
     def test_writes_grouped_index(self):
         with tempfile.TemporaryDirectory() as td:

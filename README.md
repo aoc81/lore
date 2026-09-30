@@ -143,7 +143,8 @@ real entries from — under the same gate as any other capture, evidence read fr
 `git show` first.
 
 **Freshness.** Code changes; learnings shouldn't silently rot. `/lore:lint` checks
-that each entry's `files:` still exist; `--report` ranks entries whose referenced code
+that each entry's `files:` still exist and that its `status:` and dates are values the
+hooks can read (a typo'd `superseeded` would be served as live guidance); `--report` ranks entries whose referenced code
 changed since they were last `verified:` (your re-verify worklist — computed in a single
 streaming `git log` pass, not one subprocess per file); `--dupes` finds near-duplicate
 entry pairs (e.g. two teammates capturing the same gotcha on parallel branches) and
