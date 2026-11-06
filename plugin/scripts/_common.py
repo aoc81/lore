@@ -286,6 +286,41 @@ def _strip_comment(s):
     return s
 
 
+# A YAML block scalar header: `key: >-`, `key: |`, and friends. The value is
+# the indented lines that follow. This is the form a long `description:` has to
+# use (an unquoted one cannot contain ": "), so a parser that stops at the
+# header reads every correctly-written long description as ">-".
+_BLOCK_HEAD = re.compile(r"^([|>])([+-]?)$")
+
+# What a plain (unquoted) YAML scalar may not contain. `: ` ends the key/value
+# mapping and invalidates the document; ` #` starts a comment and silently
+# truncates the value. Claude Code drops a SKILL.md's whole frontmatter when it
+# does not parse and falls back to the first heading, so a skill written this
+# way loses its trigger text with nothing reported.
+_PLAIN_UNSAFE = (": ", " #")
+
+
+def _block_scalar(lines, i, style):
+    """`(value, next_index)` for the block scalar whose header is at `lines[i]`.
+
+    Folded (`>`) joins the lines with spaces, literal (`|`) with newlines; a
+    `-` chomping indicator is handled by the caller stripping the result. Good
+    enough for a frontmatter description, which is what uses this -- it does
+    not implement indentation indicators or blank-line folding rules.
+    """
+    body, j = [], i + 1
+    while j < len(lines):
+        line = lines[j]
+        if line.strip() and not line[:1].isspace():
+            break  # a new key at column 0 ends the scalar
+        body.append(line.strip())
+        j += 1
+    while body and not body[-1]:
+        body.pop()
+    joined = ("\n" if style == "|" else " ").join(body)
+    return joined.strip(), j
+
+
 def parse_frontmatter(text):
     """Parse the leading `--- ... ---` YAML-ish block (simple subset). Returns dict.
 
@@ -316,6 +351,13 @@ def parse_frontmatter(text):
                     break
             fm[key] = vals
             i = j
+            continue
+        block = _BLOCK_HEAD.match(rest)
+        if block:
+            # `description: >-` and the indented lines under it. Without this
+            # the value reads as the literal ">-", which is what a long,
+            # correctly-written description would have given recall.
+            fm[key], i = _block_scalar(lines, i, block.group(1))
             continue
         if rest == "[]":
             fm[key] = []
@@ -568,6 +610,45 @@ def skill_body(path):
 def body_words(path):
     """Word count of a consolidated skill's body -- the /lore:consolidate budget."""
     return len(skill_body(path).split())
+
+
+def host_unsafe_keys(path):
+    """Frontmatter keys whose PLAIN scalar a YAML parser would reject, or None.
+
+    None means there is no frontmatter block at all. The distinction matters
+    for a consolidated skill, because Claude Code reads `name` and
+    `description` from it and, when the block does not parse, falls back to the
+    file's first heading -- so the skill keeps working as a file and silently
+    loses the one line that decides when it loads. Lore's own parser is
+    line-based and lenient, so it reads those descriptions perfectly well and
+    would otherwise never notice the host had thrown them away.
+
+    Measured on one real consolidation: 42 of 47 skills had a `description:`
+    containing an unquoted ": ", every one of them indexed happily by recall
+    and none of them loadable by the host.
+
+    Quoting the value, or writing it as a `>-` block scalar, fixes it.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.S)
+    if not m:
+        return None
+    bad = []
+    for line in m.group(1).splitlines():
+        km = re.match(r"^([A-Za-z0-9_]+):[ \t]*(.*)$", line)
+        if not km:
+            continue
+        key, value = km.group(1), km.group(2).strip()
+        if not value or _BLOCK_HEAD.match(value):
+            continue  # a list, or a block scalar: both are safe
+        if value[0] in "\"'" or value.startswith("["):
+            continue  # quoted, or a flow sequence
+        if any(u in value for u in _PLAIN_UNSAFE):
+            bad.append(key)
+    return bad
 
 
 def skill_cites(skill, entry):

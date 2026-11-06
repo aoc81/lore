@@ -41,8 +41,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (LOG_NAME, body_words, find_project_dir,  # noqa: E402
-                     iter_consolidated, iter_entries, load_config,
-                     norm_rel, personal_store, rel_path,
+                     host_unsafe_keys, iter_consolidated, iter_entries,
+                     load_config, norm_rel, personal_store, rel_path,
                      resolve_consolidated, shell_safe, skill_cites,
                      store_dirs)
 from recall import match_by_file, rank_matches  # noqa: E402
@@ -99,6 +99,17 @@ def cmd_plan(project, cfg, entries, consolidated, category=None):
                   "   -> invisible to edit-time recall")
             for c in no_refs[:5]:
                 print(f"      - {rel_path(project, c['path'])}")
+        unloadable = [(c, k) for c, k in
+                      ((c, host_unsafe_keys(c["path"])) for c in consolidated)
+                      if k]
+        if unloadable:
+            print(f"    ! frontmatter the host cannot parse: {len(unloadable)}")
+            for c, keys in unloadable[:5]:
+                print(f"      - {rel_path(project, c['path'])}  "
+                      f"(unquoted ': ' or ' #' in {', '.join(keys)})")
+            print("      Claude Code drops the whole block and uses the first")
+            print("      heading, so the skill loses its trigger text. Quote the")
+            print("      value or use a `>-` block scalar.")
 
     live = [e for e in entries if e["status"] not in stale_set]
     done, dangling, todo = [], [], []

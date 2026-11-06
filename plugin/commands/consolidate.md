@@ -67,11 +67,21 @@ is their decision, not yours — it changes what every future prompt loads.
    ```markdown
    ---
    name: lore-<topic>
-   description: <what this covers, and when to load it — recall matches prompts against this line>
+   description: >-
+     What this covers, and when to load it. Recall matches prompts against
+     this line, and so does the host when it decides whether to load the skill.
    tags: [<the union of the absorbed entries' tags>]
    files: [<the union of their files: refs — exact paths, dir prefixes, globs>]
    ---
    ```
+
+   **Use the `>-` block scalar, or quote the value.** A long description almost
+   always contains `": "`, and YAML rejects that in a plain scalar — Claude Code
+   then drops the *entire* frontmatter and falls back to the file's first heading,
+   so the skill silently loses the line that decides when it loads. An unquoted
+   ` #` truncates it at the comment instead. Nothing errors, and lore's own parser
+   is lenient enough to read the description anyway, so only `/lore:lint` and
+   `--plan` will tell you. Measured on one real pass: 42 of 47 skills.
 
    `tags:` and `files:` are **not optional decoration**. `tags:` is how a prompt
    reaches the skill; `files:` is how it reaches edit-time recall. A skill with no
