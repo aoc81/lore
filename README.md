@@ -118,7 +118,9 @@ never committed) — and a `PostToolUse` hook logs it again when the agent actua
 **reads** the file, so `/lore:stats` can separate *shown* from *used*: an entry
 surfaced 40 times and never opened has a misleading title, not a useful lesson.
 Recall searches **two** stores when you configure one: the committed team store and
-a private `personalStoreDir` (see [Two stores](#two-stores-team-and-personal)).
+a private `personalStoreDir` (see [Two stores](#two-stores-team-and-personal)), plus
+the **consolidated layer** when you configure that (see
+[Consolidation](#consolidation-when-the-store-outgrows-recall)).
 You can also query the same scorer by hand with `/lore:search <query>`.
 
 **Capture (write).** A `Stop` hook reminds the agent, at the end of a turn, to record a
@@ -153,7 +155,10 @@ entries, recall activity — including entries that never surface and entries th
 surface but are never read — near-duplicate count, dangling links). The optional
 pre-push hook runs the existence check before every push, and the linter warns when the
 `.lore/` hook copies fall behind the installed plugin version — or when `.lore.json`
-has a key the hooks are silently ignoring (a typo like `maxRecal`).
+has a key the hooks are silently ignoring (a typo like `maxRecal`). With a
+[consolidated layer](#consolidation-when-the-store-outgrows-recall) it also checks
+both directions of that link: an entry stamped for a skill that no longer exists, and
+a skill citing an entry that has been deleted.
 For a team, `/lore:init` also offers a **CI guard** — a small GitHub Actions workflow
 running the same two scripts on every PR, so the secret scan protects everyone, not
 just whoever installed the git hook (see [Security](#security)).
@@ -168,13 +173,15 @@ just whoever installed the git hook (see [Security](#security)).
 | `/lore:search <query>` | Search the store by title/tags — the same scorer the recall hook uses. |
 | `/lore:lint [--report\|--dupes\|--index\|--strict]` | Freshness linter: ref-check, drift triage, dupe triage, index regen. |
 | `/lore:stats` | Store-health snapshot: counts, drift backlog, recall activity, dupes, dangling links. |
+| `/lore:consolidate [category]` | Distil entries into short per-topic skills, with a recall-parity check. |
 | `/lore:sweep [scope]` | Semantically re-verify drifted entries against the code and update them. |
 | `/lore:scan [path]` | Scan the store for committed secrets (the pre-push guard, run on demand). |
 
 These are **Claude Code** slash commands. On Codex there are no `/lore:*` commands —
 `init` is `python3 codex/install.py`, `capture` is the `lore` skill + the `Stop` hook,
-and `lint`/`mine` are direct `python3 ~/.codex/lore/{verify_refs,mine_history}.py`
-calls (see [codex/README.md](codex/README.md)).
+and `lint`/`mine`/`consolidate` are direct
+`python3 ~/.codex/lore/{verify_refs,mine_history,consolidate}.py` calls (see
+[codex/README.md](codex/README.md)).
 
 ## The learnings format
 
@@ -190,6 +197,7 @@ tags: [ci, cache, lockfile]
 files: [.github/workflows/ci.yml]   # exact path, dir prefix (src/auth/), or glob (src/*.py)
 status: current         # or: superseded / obsolete
 verified: 2026-01-01     # optional; bump after a re-verify to clear it from drift triage
+consolidated_into: lore-ci   # optional; set by /lore:consolidate, never by hand
 ---
 ```
 
@@ -215,7 +223,9 @@ Optional `.lore.json` in your project root:
   "stopWords": ["widget", "todo"],
   "secretAllow": ["\\bAKIAEXAMPLE\\b"],
   "captureNudge": "smart",
-  "personalStoreDir": "~/.lore/learnings"
+  "personalStoreDir": "~/.lore/learnings",
+  "consolidatedDirs": [".claude/skills/lore-*"],
+  "consolidatedMaxWords": 500
 }
 ```
 
@@ -236,6 +246,11 @@ findings there (for genuine false positives or illustrative examples).
 absolute, `~`-prefixed, or project-relative; a path inside the team store is
 refused, since it would be committed anyway. See
 [Two stores](#two-stores-team-and-personal).
+
+`consolidatedDirs` enables the consolidated layer (`[]`/absent = off): globs naming
+skill directories, or the `SKILL.md` files themselves. `consolidatedMaxWords` is the
+per-skill body budget `/lore:consolidate` works to. See
+[Consolidation](#consolidation-when-the-store-outgrows-recall).
 
 `captureNudge` controls the end-of-turn capture nudge: `"smart"` (default —
 skip turns that used no tools at all), `"always"` (nudge every turn), or
@@ -270,6 +285,62 @@ instead of the shared store):
 `/lore:stats` counts personal entries so a two-store setup never looks half-empty.
 To make the **whole** store private instead, just add your store directory (e.g.
 `learnings/`) to `.gitignore`.
+
+## Consolidation: when the store outgrows recall
+
+A store that works grows. Past a few hundred entries it is a good archive and a bad
+briefing: nobody reads 450 files, and recall can only ever inject `maxRecall` of them
+per prompt. The fix is a second, shorter layer — one **skill per topic**, distilled
+from the entries and loaded on demand:
+
+```json
+{ "consolidatedDirs": [".claude/skills/lore-*"], "consolidatedMaxWords": 500 }
+```
+
+`/lore:consolidate` groups the entries by topic, writes or updates
+`.claude/skills/lore-<topic>/SKILL.md` within the word budget, and links each rule
+back to the entry it came from. Recall then reads **both** layers, indexing each
+skill on its `name` + `description` and on its `tags:`/`files:` when it has them,
+and flags what it surfaces `[consolidated]`.
+
+**The entries stay.** This is the whole design, and it is the opposite of the
+"consolidate, then delete the notes" instinct:
+
+| | entries (`storeDir`) | consolidated skills |
+|---|---|---|
+| Holds | root cause, repro, dead ends, `files:` | the current rule, in a few lines |
+| Reached by | title + tags, and `files:` at edit time | `name` + `description`, and its own `files:` |
+| Read when | you open it, deliberately | the topic comes up |
+| Deleted by consolidation | **no** | — |
+
+Two things vanish with the entries if you delete them: the **why** (a 500-word
+summary holds the rule and loses the root cause, the repro, and what didn't work),
+and the **index** — recall matches entries on `title`/`tags`/`files:`, so an entry
+deleted after being summarized is a lesson that is in git history and will never
+surface again. So entries are **marked**, not removed: `/lore:consolidate` stamps
+`consolidated_into: <skill>` on each one and changes nothing else.
+
+Recall prefers the skill over the entries it absorbed **when both match** — you get
+the short version, not both. When the skill doesn't match, the entry is still there:
+most importantly at edit time, where an entry's `files:` often names a path the
+skill's frontmatter does not, and that entry is the only thing that knows about it.
+
+The pass is verifiable rather than hopeful. `--snapshot` records what recall answers
+for every entry's own title+tags *before* you start; `--compare` replays it after and
+**exits non-zero if any entry became reachable by nothing** — a hard gate on the
+failure mode this whole feature exists to prevent. Each pass appends to
+`<storeDir>/WEEKLY_LOG.md`, and `/lore:lint` then checks both directions of the new
+link: an entry stamped for a skill that doesn't exist, and a skill citing an entry
+that's been deleted. `/lore:stats` shows how many entries are consolidated and how
+many aren't.
+
+Deletion is proposed, never performed, and only for entries that are **both**
+`superseded`/`obsolete` **and** already absorbed — `--prune` prints the list and the
+`git rm` for you to run. A `current` entry is never a candidate, however thoroughly
+it has been summarized.
+
+With `consolidatedDirs` unset there is no consolidated layer and every path above
+behaves exactly as it did before — the feature is opt-in per project.
 
 ## Security
 

@@ -17,6 +17,12 @@ DEFAULTS = {
     # Optional PRIVATE second store, read by recall alongside the team store.
     # "" = off. May be absolute, ~-prefixed, or project-relative.
     "personalStoreDir": "",
+    # Optional CONSOLIDATED layers: globs of skill dirs (or SKILL.md files)
+    # holding topic summaries distilled from many entries, e.g.
+    # [".claude/skills/lore-*"]. [] = off, and then nothing below changes.
+    "consolidatedDirs": [],
+    # Body-word budget for one consolidated skill (the /lore:consolidate limit).
+    "consolidatedMaxWords": 500,
 }
 
 _NUDGE_MODES = ("always", "smart", "off")
@@ -42,9 +48,9 @@ def _valid(key, value):
         return isinstance(value, str) and bool(value.strip())
     if key == "personalStoreDir":
         return isinstance(value, str)  # "" is the documented off switch
-    if key in ("maxRecall", "staleAfterMonths"):
+    if key in ("maxRecall", "staleAfterMonths", "consolidatedMaxWords"):
         return isinstance(value, int) and not isinstance(value, bool) and value > 0
-    if key in ("staleStatuses", "secretAllow", "stopWords"):
+    if key in ("staleStatuses", "secretAllow", "stopWords", "consolidatedDirs"):
         return (isinstance(value, list)
                 and all(isinstance(x, str) for x in value))
     if key == "captureNudge":
@@ -262,13 +268,15 @@ def read_frontmatter(path):
 def iter_entries(store, personal=False):
     """Yield a normalized dict per learning file under `store`.
 
-    Skips README.md and any `_`/`.`-prefixed file (templates, partials) so they
-    never count as entries, show up in the index, or match in recall.
-    `personal` tags every yielded entry as coming from the private store.
+    Skips README.md, the consolidation journal, and any `_`/`.`-prefixed file
+    (templates, partials) so they never count as entries, show up in the index,
+    or match in recall. `personal` tags every yielded entry as coming from the
+    private store.
     """
     store = Path(store)
+    skip = ("readme.md", LOG_NAME.lower())
     for p in sorted(store.rglob("*.md")):
-        if p.name.lower() == "readme.md" or p.name[:1] in ("_", "."):
+        if p.name.lower() in skip or p.name[:1] in ("_", "."):
             continue
         fm = read_frontmatter(p)
         if fm is None:
@@ -289,6 +297,15 @@ def iter_entries(store, personal=False):
             "verified": str(fm.get("verified") or ""),
             "category": str(fm.get("category") or p.parent.name),
             "personal": personal,
+            # Set by /lore:consolidate: the consolidated skill that now carries
+            # this entry's rules. The entry itself is never deleted for it.
+            "consolidated_into": str(fm.get("consolidated_into") or ""),
+            "consolidated": False,
+            "description": "",
+            # Empty = "match on the title", which is what an entry does.
+            # Only consolidated skills override the matched text; see
+            # iter_consolidated.
+            "match_text": "",
         }
 
 
@@ -304,6 +321,161 @@ def iter_store_entries(stores):
             continue
         for e in iter_entries(store, personal=personal):
             yield e
+
+
+# --- the consolidated layer --------------------------------------------------
+# A store grows past the point where anyone reads it: 450 one-fact entries are
+# a good archive and a bad briefing. `/lore:consolidate` distils them into a
+# handful of topic skills (`.claude/skills/lore-ci/SKILL.md`), each short enough
+# to load on demand. Those skills are a SECOND index for recall, not a
+# replacement: the entries stay on disk, marked `consolidated_into:`, because
+# only they carry the root cause, the repro, and the `files:` that power
+# edit-time recall. Recall reads both layers and prefers the skill when the two
+# overlap -- see recall.rank_matches.
+#
+# `consolidatedDirs` is empty by default, so a project that never consolidates
+# behaves exactly as it did before this existed.
+
+SKILL_FILE = "SKILL.md"
+
+# The consolidation journal, kept inside the store. Named here (not just in
+# consolidate.py) because `iter_entries` has to skip it: it is a dated log with
+# no frontmatter, and left unskipped it would count as an entry everywhere.
+LOG_NAME = "WEEKLY_LOG.md"
+
+
+def consolidated_paths(project, cfg):
+    """Resolved SKILL.md paths for every configured consolidated layer.
+
+    Each `consolidatedDirs` glob may name skill DIRECTORIES
+    (`.claude/skills/lore-*`, the usual form -- the SKILL.md inside each hit is
+    used) or the markdown files themselves. Unresolvable globs are skipped
+    rather than raised: this runs inside hooks.
+    """
+    project = Path(project)
+    out = []
+    for pattern in cfg.get("consolidatedDirs") or []:
+        pattern = norm_rel(pattern)
+        if not pattern:
+            continue
+        try:
+            hits = sorted(project.glob(pattern))
+        except (OSError, ValueError, NotImplementedError, IndexError):
+            continue
+        for h in hits:
+            if h.is_dir():
+                f = h / SKILL_FILE
+                if f.is_file():
+                    out.append(f)
+            elif h.is_file() and h.suffix.lower() == ".md":
+                out.append(h)
+    return list(dict.fromkeys(out))
+
+
+def _discriminating_tokens(names):
+    """Per-name token sets with the family-wide tokens removed.
+
+    Consolidated skills share a prefix by convention (`lore-ci`, `lore-auth`,
+    ...), and a token present in EVERY name discriminates nothing. Left in, a
+    prompt that merely says "lore" would exact-match that token on all 47
+    skills and inject five of them at random. Nothing is dropped when there is
+    only one skill, where there is no family to speak of.
+    """
+    sets = [set(words(n)) for n in names]
+    if len(sets) < 2:
+        return sets
+    common = set.intersection(*sets)
+    return [s - common for s in sets]
+
+
+def iter_consolidated(project, cfg):
+    """Yield a normalized entry dict per consolidated skill, recall-shaped.
+
+    A skill is indexed by its `name` (as the title) and its `description`
+    (routing prose, matched like a title), plus `tags:` and `files:` when the
+    skill carries them -- which is what keeps edit-time recall working after a
+    consolidation pass. The discriminating words of the name are also folded
+    into `tags`, so a short prompt word ("ci", "api") still reaches `lore-ci`:
+    recall matches short words against tags only, and a curated skill name is
+    exactly that kind of vocabulary.
+
+    `match_text` is what recall scores the skill on -- the discriminating name
+    words plus the description, NOT the raw title. The family prefix is in the
+    title and must not be scored: in a project with 47 `lore-*` skills, a
+    prompt that merely says "lore" would otherwise exact-match every one of
+    them and inject five at random.
+    """
+    raw = []
+    for p in consolidated_paths(project, cfg):
+        fm = read_frontmatter(p)
+        if fm is None:
+            continue
+        raw.append((p, fm, str(fm.get("name") or p.parent.name)))
+    token_sets = _discriminating_tokens([n for _p, _f, n in raw])
+    for (p, fm, name), name_tokens in zip(raw, token_sets):
+        tags = fm.get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        files = fm.get("files") or []
+        if isinstance(files, str):
+            files = [files]
+        description = str(fm.get("description") or "")
+        tags = [str(t) for t in tags]
+        tags += [t for t in sorted(name_tokens) if t not in set(words(" ".join(tags)))]
+        yield {
+            "path": p,
+            "title": name,
+            "tags": tags,
+            "files": [str(f) for f in files],
+            "status": str(fm.get("status") or "current").lower(),
+            "date": str(fm.get("date") or ""),
+            "verified": str(fm.get("verified") or ""),
+            "category": str(fm.get("category") or "consolidated"),
+            "personal": False,
+            "consolidated_into": "",
+            "consolidated": True,
+            "description": description,
+            "match_text": " ".join(sorted(name_tokens)) + " " + description,
+        }
+
+
+def consolidated_ids(project, entry):
+    """Every name a `consolidated_into:` value may use for this skill.
+
+    Entries are written by hand as often as by the command, so all the obvious
+    spellings resolve: the skill `name`, its directory name, and the
+    project-relative path of either the directory or the SKILL.md.
+    """
+    p = Path(entry["path"])
+    cands = [entry["title"], p.parent.name, rel_path(project, p),
+             rel_path(project, p.parent)]
+    return {_cmp(norm_rel(c)) for c in cands if c}
+
+
+def resolve_consolidated(project, entry, consolidated):
+    """The consolidated skill an entry's `consolidated_into:` names, or None."""
+    ref = _cmp(norm_rel(entry.get("consolidated_into") or ""))
+    if not ref:
+        return None
+    for c in consolidated:
+        if ref in consolidated_ids(project, c):
+            return c
+    return None
+
+
+def skill_body(path):
+    """A consolidated skill's body text (everything after the frontmatter)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    m = re.match(r"^---\s*\n.*?\n---\s*(?:\n|$)", text, re.S)
+    return text[m.end():] if m else text
+
+
+def body_words(path):
+    """Word count of a consolidated skill's body -- the /lore:consolidate budget."""
+    return len(skill_body(path).split())
 
 
 # --- file-reference matching -------------------------------------------------

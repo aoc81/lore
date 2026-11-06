@@ -8,7 +8,7 @@ if str(SCRIPTS) not in sys.path:
 
 
 def write_entry(store, relpath, title="", tags=(), files=(), status="current",
-                date="", verified="", body="Body."):
+                date="", verified="", body="Body.", consolidated_into=""):
     """Write a minimal learning file under `store` and return its Path."""
     p = Path(store) / relpath
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -20,6 +20,23 @@ def write_entry(store, relpath, title="", tags=(), files=(), status="current",
     fm.append(f"status: {status}")
     if verified:
         fm.append(f"verified: {verified}")
+    if consolidated_into:
+        fm.append(f"consolidated_into: {consolidated_into}")
+    fm.append("---")
+    p.write_text("\n".join(fm) + "\n\n" + body + "\n", encoding="utf-8")
+    return p
+
+
+def write_skill(project, name, description="", tags=(), files=(),
+                body="# Skill\n\nRules.", skills_dir=".claude/skills"):
+    """Write a consolidated skill at `<project>/<skills_dir>/<name>/SKILL.md`."""
+    p = Path(project) / skills_dir / name / "SKILL.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fm = ["---", f"name: {name}", f"description: {description}"]
+    if tags:
+        fm.append(f"tags: [{', '.join(tags)}]")
+    if files:
+        fm.append(f"files: [{', '.join(files)}]")
     fm.append("---")
     p.write_text("\n".join(fm) + "\n\n" + body + "\n", encoding="utf-8")
     return p

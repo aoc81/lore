@@ -32,7 +32,7 @@ SCRIPTS = SRC / "scripts"
 SKILL_SRC = SRC / "skills" / "lore" / "SKILL.md"
 TEMPLATES = SRC / "templates"
 CORE = ["recall.py", "capture_check.py", "verify_refs.py", "scan_secrets.py",
-        "mine_history.py", "_common.py"]
+        "mine_history.py", "consolidate.py", "_common.py"]
 
 
 def codex_home():

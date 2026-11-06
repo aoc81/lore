@@ -140,6 +140,29 @@ verified: YYYY-MM-DD       # optional; set when you confirm the claim against cu
 ---
 ```
 
+`consolidated_into:` may also appear on an existing entry. Never write it by hand
+and never remove it: `/lore:consolidate` owns it (see
+[Consolidated stores](#consolidated-stores)).
+
+## Consolidated stores
+
+Some projects also run a **consolidated layer** (`consolidatedDirs` in `.lore.json`):
+per-topic skills such as `.claude/skills/lore-ci/SKILL.md`, distilled from the
+entries by `/lore:consolidate` and surfaced by recall flagged `[consolidated]`.
+
+What that changes for capture: **nothing.** Capture always writes a full entry to the
+store, never a line in a skill.
+
+- A new learning goes in `<storeDir>/<category>/<slug>.md` as always, even when a
+  skill covers the topic. The skill holds the rule; the entry holds the root cause,
+  the repro, what didn't work, and the `files:` that drive edit-time recall. The next
+  `/lore:consolidate` pass folds it in.
+- If the overlap check (step 2) surfaces a `[consolidated]` skill rather than an
+  entry, that is not a duplicate — the skill is a summary. Read it to see whether the
+  rule is already known, then still write or update the **entry**.
+- Never edit a skill to record a new learning, never set or clear
+  `consolidated_into:`, and never delete an entry because a skill now summarizes it.
+
 ## Body — bug track
 
 `## Problem` · `## Root Cause` · `## What Didn't Work` · `## Solution` · `## Prevention`
