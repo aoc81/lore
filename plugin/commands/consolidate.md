@@ -83,7 +83,10 @@ is their decision, not yours — it changes what every future prompt loads.
    Body: one bullet per rule, each with **what** and **why**, commands and thresholds
    verbatim, and a link to the entry it came from — a relative markdown link to the
    entry file, so the reader can get the full story and `/lore:lint` can verify the
-   citation. Stay under `consolidatedMaxWords` (500 by default); past it, **split by
+   citation. **That link is load-bearing**, not a courtesy: recall only lets a skill
+   stand in for an entry whose path or slug appears in the skill's body, and
+   `--mark` refuses the entries you left uncited. If a rule is too compressed to
+   name its source, it is too compressed to replace it. Stay under `consolidatedMaxWords` (500 by default); past it, **split by
    sub-topic** into a second skill with its own sharp `description` rather than
    writing 900 words nobody loads. Prioritize secret, CI, and deploy rules.
 
@@ -97,9 +100,17 @@ is their decision, not yours — it changes what every future prompt loads.
    "$PY" "$C" --mark lore-<topic> learnings/<topic>/<a>.md learnings/<topic>/<b>.md
    ```
 
-   This adds `consolidated_into:` and changes nothing else. Recall then prefers the
-   skill over these entries when both match — and still surfaces an entry on its own
-   when it is the only thing that matches the file being edited.
+   This adds `consolidated_into:` and changes nothing else. The stamp tells recall
+   it may hide the entry behind the skill, so **`--mark` refuses an entry the
+   skill's body does not cite** — write the rule and its link first (step 3), then
+   mark. That order is not bureaucracy: an entry stamped into a skill that never
+   mentions it is a lesson recall will suppress in favour of a summary that does
+   not contain it.
+
+   Mark **one topic at a time, from what you actually wrote.** Never bulk-mark by
+   guessing which skill a note belongs to — a scorer can match a note's words to a
+   skill's name while the skill's body says nothing about it. `--force` exists for
+   a citation written in a form this can't see; using it means you checked by hand.
 
 6. **Prove recall survived.** This is the gate, not a formality:
 
@@ -107,10 +118,19 @@ is their decision, not yours — it changes what every future prompt loads.
    "$PY" "$C" --compare .lore-recall-before.json
    ```
 
-   It replays every baseline query and exits non-zero if any entry became reachable
-   by nothing. **Do not commit while it reports a regression.** Fix the cause: add the
-   missing tags/files to the skill, or mark the entry, or keep it as it was. Report the
-   numbers to the user verbatim — unchanged, absorbed, regressed.
+   It checks **both** surfaces and exits non-zero if either lost something:
+
+   - **prompt** — every baseline query still reaches its entry, or a skill that
+     *cites* it. A skill answering without citing the entry counts as a loss.
+   - **edit** — for every path an entry names in `files:`, that entry still
+     surfaces within `maxRecall` when the path is edited.
+
+   The second one is the half no retrieval benchmark can see, and the half that
+   dies quietly: asking only "does anything still fire" passes while every entry
+   has been displaced by a skill carrying a union of refs. **Do not commit while it
+   reports a regression.** Report the numbers to the user verbatim, including how
+   many (entry, path) pairs the edit check actually examined — a check that
+   examined none must not be read as a pass.
 
 7. **Journal the pass.**
 

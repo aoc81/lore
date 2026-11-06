@@ -570,6 +570,29 @@ def body_words(path):
     return len(skill_body(path).split())
 
 
+def skill_cites(skill, entry):
+    """True when a skill's BODY names `entry` -- its slug, filename, or path.
+
+    This is the evidence that a skill actually carries an entry's rule, and
+    recall will not hide the entry behind the skill without it. The frontmatter
+    stamp alone is not evidence: `consolidated_into:` says someone intended the
+    skill to cover the entry, while the citation says the rule is in there, next
+    to a link back to the full account.
+
+    Measured on a real pass before this existed: 411 entries were stamped into
+    skills whose bodies cited NONE of them, and recall hid all 411 behind
+    summaries as short as 32 words -- one of them truncated mid-sentence. Which
+    is why /lore:consolidate asks for the link, and why this reads the body
+    rather than trusting the stamp.
+    """
+    body = skill_body(skill["path"]) if isinstance(skill, dict) else str(skill)
+    body = body.casefold()  # both sides folded: a citation's case is the
+    p = Path(entry["path"]) if isinstance(entry, dict) else Path(entry)
+    # author's, not the filesystem's, on every platform.
+    return any(c and c.casefold() in body
+               for c in (p.stem, p.name, norm_rel(p.as_posix())))
+
+
 # --- file-reference matching -------------------------------------------------
 # A frontmatter `files:` ref can be an exact path, a directory prefix (ends
 # with "/"), or a glob (contains * ? [ ). Paths compare case-insensitively on

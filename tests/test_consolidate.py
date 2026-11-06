@@ -150,7 +150,8 @@ class TestRecallPreference(LayerCase):
         write_skill(self.project, "lore-ci",
                     description="CI invariants: cache keys and required checks.",
                     tags=("ci", "cache", "lockfile"),
-                    files=(".github/workflows/ci.yml",))
+                    files=(".github/workflows/ci.yml",),
+                    cites=("learnings/ci/cache.md",))
 
     def test_skill_surfaces_and_is_flagged(self):
         # The flag has to be there, so a summary is never read as the entry's
@@ -165,6 +166,46 @@ class TestRecallPreference(LayerCase):
         got = self.rank("cache key lockfile hash")
         self.assertIn(".claude/skills/lore-ci/SKILL.md", got)
         self.assertNotIn("learnings/ci/cache.md", got)
+
+    def test_an_uncited_entry_is_never_hidden_behind_its_skill(self):
+        # The stamp records an intention; the citation is the evidence the rule
+        # is in the skill. Measured on a real pass, 411 of 411 stamped entries
+        # were cited by nothing and recall hid every one of them.
+        write_entry(self.store, "ci/lonely.md",
+                    title="Pipeline cache restore order matters",
+                    tags=("pipeline", "restore"),
+                    consolidated_into="lore-ci")
+        got = self.rank("pipeline restore order")
+        self.assertIn("learnings/ci/lonely.md", got)
+
+    def test_a_citing_skill_still_absorbs(self):
+        write_entry(self.store, "ci/lonely.md",
+                    title="Pipeline cache restore order matters",
+                    tags=("pipeline", "restore"),
+                    consolidated_into="lore-cited")
+        write_skill(self.project, "lore-cited",
+                    description="Pipeline restore order rules.",
+                    tags=("pipeline", "restore"),
+                    cites=("learnings/ci/lonely.md",))
+        got = self.rank("pipeline restore order")
+        self.assertIn(".claude/skills/lore-cited/SKILL.md", got)
+        self.assertNotIn("learnings/ci/lonely.md", got)
+
+    def test_edit_recall_puts_entries_ahead_of_skills(self):
+        # A skill's `files:` is a union and matches broadly; ahead of the
+        # entries it spends every maxRecall slot on broad matches. Measured on
+        # a real pass with skills first: 853 of 853 (entry, path) pairs lost
+        # the entry that knew about the path.
+        for i in range(2):
+            write_entry(self.store, f"a/e{i}.md", title=f"Specific thing {i}",
+                        tags=("thing",), files=("src/app.py",))
+        write_skill(self.project, "lore-broad", description="Broad rules.",
+                    tags=("broad",), files=("src/",))
+        got = self.by_file("src/app.py")
+        # match_by_file does not truncate -- the hook applies maxRecall -- so
+        # what matters is that the entries hold the first slots.
+        self.assertEqual(got[:2], ["learnings/a/e0.md", "learnings/a/e1.md"])
+        self.assertEqual(got[-1], ".claude/skills/lore-broad/SKILL.md")
 
     def test_unabsorbed_entry_still_surfaces(self):
         self.assertIn("learnings/ci/runner.md", self.rank("runner disk full"))
@@ -189,7 +230,7 @@ class TestRecallPreference(LayerCase):
                     tags=("widget", "telemetry", "batching", "retries"),
                     consolidated_into="lore-widget")
         write_skill(self.project, "lore-widget", description="Widget rules.",
-                    tags=("widget",))
+                    tags=("widget",), cites=("learnings/ci/quiet.md",))
         got = self.rank("widget telemetry batching retries window")
         self.assertEqual(got[0], ".claude/skills/lore-widget/SKILL.md")
 
@@ -204,6 +245,11 @@ class TestRecallPreference(LayerCase):
         write_entry(self.store, "ci/deploy.md", title="Deploy needs a tag push",
                     tags=("deploy",), files=("scripts/deploy.sh",),
                     consolidated_into="lore-ci")
+        write_skill(self.project, "lore-ci",
+                    description="CI invariants: cache keys and required checks.",
+                    tags=("ci", "cache", "lockfile"),
+                    files=(".github/workflows/ci.yml",),
+                    cites=("learnings/ci/cache.md", "learnings/ci/deploy.md"))
         self.assertEqual(self.by_file("scripts/deploy.sh"),
                          ["learnings/ci/deploy.md"])
 
@@ -345,7 +391,8 @@ class TestParityCheck(LayerCase):
         write_skill(self.project, "lore-ci",
                     description="CI invariants: cache keys and lockfiles.",
                     tags=("ci", "cache", "lockfile"),
-                    files=(".github/workflows/ci.yml",))
+                    files=(".github/workflows/ci.yml",),
+                    cites=("learnings/ci/cache.md",))
         rc, _out = self.run_cli(
             ["--mark", "lore-ci", str(self.store / "ci" / "cache.md")])
         self.assertEqual(rc, 0)
@@ -368,7 +415,8 @@ class TestParityCheck(LayerCase):
         write_skill(self.project, "lore-auth",
                     description="Auth: JWT refresh options and CORS hosts.",
                     tags=("auth", "jwt", "refresh"),
-                    files=("src/auth/session.py",))
+                    files=("src/auth/session.py",),
+                    cites=("learnings/auth/jwt.md",))
         (self.store / "auth" / "jwt.md").unlink()
         rc, out = self.run_cli(["--compare", str(self.snap)])
         self.assertEqual(rc, 0, out)
@@ -394,7 +442,8 @@ class TestParityCheck(LayerCase):
         self.snapshot()
         write_skill(self.project, "lore-ci",
                     description="CI cache and lockfile invariants.",
-                    tags=("ci", "cache", "lockfile"))
+                    tags=("ci", "cache", "lockfile"),
+                    cites=tuple(f"learnings/ci/n{i}.md" for i in range(6)))
         for i in range(6):
             self.run_cli(["--mark", "lore-ci",
                           str(self.store / "ci" / f"n{i}.md")])
@@ -426,6 +475,63 @@ class TestParityCheck(LayerCase):
         self.snap.write_text(json.dumps(data), encoding="utf-8")
         rc, out = self.run_cli(["--compare", str(self.snap)])
         self.assertEqual(rc, 0, out)
+
+    def test_an_uncited_skill_taking_the_slot_is_a_regression(self):
+        # The failure this gate missed. With one slot, a skill outranks the
+        # entry on the prompt surface -- and if its body never mentions the
+        # entry, it is not a substitute for it.
+        self.snapshot()
+        write_skill(self.project, "lore-ci",
+                    description="Cache key must include the lockfile hash.",
+                    tags=("ci", "cache", "lockfile"))
+        self.run_cli(["--mark", "lore-ci",
+                      str(self.store / "ci" / "cache.md"), "--force"])
+        (self.project / ".lore.json").write_text(json.dumps(
+            {"maxRecall": 1,
+             "consolidatedDirs": [".claude/skills/lore-*"]}), encoding="utf-8")
+        rc, out = self.run_cli(["--compare", str(self.snap)])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("learnings/ci/cache.md", out)
+
+    def test_the_same_skill_citing_the_entry_is_accepted(self):
+        self.snapshot()
+        write_skill(self.project, "lore-ci",
+                    description="Cache key must include the lockfile hash.",
+                    tags=("ci", "cache", "lockfile"),
+                    cites=("learnings/ci/cache.md",))
+        self.run_cli(["--mark", "lore-ci",
+                      str(self.store / "ci" / "cache.md")])
+        (self.project / ".lore.json").write_text(json.dumps(
+            {"maxRecall": 1,
+             "consolidatedDirs": [".claude/skills/lore-*"]}), encoding="utf-8")
+        rc, out = self.run_cli(["--compare", str(self.snap)])
+        self.assertEqual(rc, 0, out)
+
+    def test_compare_measures_the_edit_surface_non_vacuously(self):
+        # It has to say how many (entry, path) pairs it actually checked --
+        # "something still fires" was the vacuous question that passed while
+        # every entry had been displaced.
+        self.snapshot()
+        rc, out = self.run_cli(["--compare", str(self.snap)])
+        self.assertEqual(rc, 0, out)
+        self.assertRegex(out, r"edit surface -- [1-9]\d* \(entry, path\) pairs")
+        self.assertIn("displaced by a skill:             0", out)
+
+    def test_a_skill_displacing_a_stale_entry_is_reported(self):
+        # Current skills do sort ahead of retired entries, so this is the one
+        # way a skill can still take an entry's slot at edit time.
+        write_entry(self.store, "ci/old.md", title="Retired cache note",
+                    tags=("retired",), files=("src/legacy/only.py",),
+                    status="superseded")
+        self.snapshot()
+        write_skill(self.project, "lore-broad", description="Broad rules.",
+                    tags=("broad",), files=("src/legacy/",))
+        (self.project / ".lore.json").write_text(json.dumps(
+            {"maxRecall": 1,
+             "consolidatedDirs": [".claude/skills/lore-*"]}), encoding="utf-8")
+        rc, out = self.run_cli(["--compare", str(self.snap)])
+        self.assertIn("displaced by a skill:             1", out)
+        self.assertEqual(rc, 1, out)
 
     def test_compare_rejects_a_file_that_is_not_a_snapshot(self):
         bad = self.project / "bad.json"
@@ -537,15 +643,33 @@ class TestMarkCommand(LayerCase):
             encoding="utf-8")
 
     def test_mark_keeps_tags_and_files(self):
-        write_skill(self.project, "lore-ci", description="CI", tags=("ci",))
         p = write_entry(self.store, "ci/a.md", title="A", tags=("ci", "cache"),
                         files=("ci.yml",))
+        write_skill(self.project, "lore-ci", description="CI", tags=("ci",),
+                    cites=("learnings/ci/a.md",))
         rc, _out = self.run_cli(["--mark", "lore-ci", str(p)])
         self.assertEqual(rc, 0)
         entry = next(iter(iter_entries(self.store)))
         self.assertEqual(entry["tags"], ["ci", "cache"])
         self.assertEqual(entry["files"], ["ci.yml"])
         self.assertEqual(entry["consolidated_into"], "lore-ci")
+
+    def test_mark_refuses_an_entry_the_skill_does_not_cite(self):
+        write_skill(self.project, "lore-ci", description="CI", tags=("ci",))
+        p = write_entry(self.store, "ci/a.md", title="A", tags=("ci",))
+        rc, out = self.run_cli(["--mark", "lore-ci", str(p)])
+        self.assertEqual(rc, 1)
+        self.assertIn("refused: not cited", out)
+        self.assertNotIn("consolidated_into",
+                         p.read_text(encoding="utf-8"))
+
+    def test_mark_force_overrides_the_citation_check(self):
+        write_skill(self.project, "lore-ci", description="CI", tags=("ci",))
+        p = write_entry(self.store, "ci/a.md", title="A", tags=("ci",))
+        rc, out = self.run_cli(["--mark", "lore-ci", str(p), "--force"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("consolidated_into: lore-ci",
+                      p.read_text(encoding="utf-8"))
 
     def test_mark_warns_about_an_unknown_skill(self):
         p = write_entry(self.store, "ci/a.md", title="A", tags=("ci",))
