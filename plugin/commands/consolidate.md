@@ -118,7 +118,14 @@ is their decision, not yours — it changes what every future prompt loads.
    "$PY" "$C" --log "<one or two sentences: which topics, which skills, what you left>"
    ```
 
-   Appends a dated block to `<storeDir>/WEEKLY_LOG.md`, newest first.
+   Appends a dated block to `<storeDir>/WEEKLY_LOG.md`, newest first, with the
+   corpus's **total body words** and the change since the last pass. Read that
+   number: a large drop on a first pass is the duplication going, but a large
+   drop on a later one means the pass **rewrote** the summaries instead of
+   extending them — and that is the one failure every other number here hides,
+   since the skills still look tidy, the entries are still marked, and recall
+   parity still passes because the entries never left. Consolidate as a delta:
+   add this week's rules to the existing skill, don't regenerate it.
 
 8. **Lint and report.** Run `/lore:lint` (it checks `consolidated_into:` targets
    exist and that each skill's entry links still resolve), then tell the user: skills

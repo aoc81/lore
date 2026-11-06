@@ -536,6 +536,28 @@ class TestJournalCommand(LayerCase):
         self.assertIn("2 current - 1 consolidated, 1 not", text)
         self.assertIn("deleted by this pass: 0", text)
 
+    def test_records_the_corpus_total_and_its_delta(self):
+        # The total is the only trace a context collapse leaves: every other
+        # number stays healthy when a pass rewrites the summaries instead of
+        # extending them.
+        self.run_cli(["--log", "First pass."])
+        self.assertRegex(self.log(), r"- total body words: \d+\n")
+        (self.project / ".claude" / "skills" / "lore-ci" / "SKILL.md"
+         ).write_text("---\nname: lore-ci\ndescription: CI\n---\n\nword\n",
+                      encoding="utf-8")
+        self.run_cli(["--log", "Second pass."])
+        self.assertRegex(self.log(), r"- total body words: 1 \(was \d+, -\d+\)")
+        self.assertIn("shed >30% of the corpus", self.log())
+
+    def test_a_growing_corpus_is_not_flagged(self):
+        self.run_cli(["--log", "First pass."])
+        (self.project / ".claude" / "skills" / "lore-ci" / "SKILL.md"
+         ).write_text("---\nname: lore-ci\ndescription: CI\n---\n\n"
+                      + " ".join(["word"] * 50) + "\n", encoding="utf-8")
+        self.run_cli(["--log", "Second pass."])
+        self.assertRegex(self.log(), r"- total body words: 50 \(was \d+, \+\d+\)")
+        self.assertNotIn("shed >30%", self.log())
+
     def test_appends_newest_first(self):
         self.run_cli(["--log", "Older pass."])
         self.run_cli(["--log", "Newer pass."])

@@ -405,6 +405,9 @@ skills, and what was pruned. Newest first. Appended by `consolidate.py --log`.
 """
 
 
+_TOTAL_RE = re.compile(r"^- total body words: (\d+)", re.M)
+
+
 def cmd_log(project, cfg, entries, consolidated, text):
     store = Path(project) / cfg["storeDir"]
     if not store.is_dir():
@@ -415,7 +418,29 @@ def cmd_log(project, cfg, entries, consolidated, text):
     live = [e for e in entries if e["status"] not in stale_set]
     done = [e for e in live
             if resolve_consolidated(project, e, consolidated) is not None]
-    widest = max((body_words(c["path"]) for c in consolidated), default=0)
+    sizes = [body_words(c["path"]) for c in consolidated]
+    widest, total = max(sizes, default=0), sum(sizes)
+    try:
+        existing = log.read_text(encoding="utf-8") if log.is_file() \
+            else _LOG_HEADER
+    except OSError as exc:
+        print(f"Cannot read {log}: {exc}")
+        return 1
+    # The total, with its delta, is the only trace a CONTEXT COLLAPSE leaves.
+    # Rewriting a whole corpus of summaries instead of extending it can shed
+    # most of it in one pass while every other number here still looks healthy
+    # -- the skills are fewer-but-shorter, the entries are all still marked,
+    # and recall parity passes because the entries never left. A big drop is
+    # expected on a FIRST pass (that is the duplication going); a big drop on a
+    # later one means the pass rewrote rather than extended.
+    prev = _TOTAL_RE.search(existing)
+    delta = ""
+    if prev:
+        was = int(prev.group(1))
+        change = total - was
+        delta = f" (was {was}, {change:+d})"
+        if was and total < was * 0.7:
+            delta += "  <- shed >30% of the corpus: rewrite, not a delta?"
     block = [
         f"## {datetime.date.today().isoformat()}",
         "",
@@ -423,18 +448,13 @@ def cmd_log(project, cfg, entries, consolidated, text):
         "",
         f"- skills: {len(consolidated)} (largest {widest} words, limit "
         f"{cfg['consolidatedMaxWords']})",
+        f"- total body words: {total}{delta}",
         f"- entries: {len(live)} current - {len(done)} consolidated, "
         f"{len(live) - len(done)} not",
         "- entries deleted by this pass: 0 (consolidation marks; it does not "
         "forget)",
         "",
     ]
-    try:
-        existing = log.read_text(encoding="utf-8") if log.is_file() \
-            else _LOG_HEADER
-    except OSError as exc:
-        print(f"Cannot read {log}: {exc}")
-        return 1
     # Newest entry first: a journal you have to scroll to the end of is one
     # nobody reads. Split the file at its first dated section.
     m = re.search(r"\n## ", existing)
