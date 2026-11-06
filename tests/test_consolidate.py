@@ -383,6 +383,50 @@ class TestParityCheck(LayerCase):
         rc, _out = self.run_cli(["--compare", str(self.snap)])
         self.assertEqual(rc, 1)
 
+    def test_a_result_pushed_out_of_the_top_n_is_not_a_regression(self):
+        # Adding a layer reshuffles the tail by design: a note that was only
+        # incidentally in another query's top maxRecall has its own query, and
+        # reporting its departure as a loss buries the real failures.
+        for i in range(6):
+            write_entry(self.store, f"ci/n{i}.md",
+                        title=f"Cache layer note {i} about lockfiles",
+                        tags=("ci", "cache", "lockfile"))
+        self.snapshot()
+        write_skill(self.project, "lore-ci",
+                    description="CI cache and lockfile invariants.",
+                    tags=("ci", "cache", "lockfile"))
+        for i in range(6):
+            self.run_cli(["--mark", "lore-ci",
+                          str(self.store / "ci" / f"n{i}.md")])
+        rc, out = self.run_cli(["--compare", str(self.snap)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("REGRESSED (no longer reachable):  0", out)
+
+    def test_snapshot_records_the_primary_of_each_query(self):
+        self.snapshot()
+        data = json.loads(self.snap.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(
+            set(data["primaries"].values()),
+            {"learnings/ci/cache.md", "learnings/auth/jwt.md"})
+
+    def test_an_extra_query_has_no_primary(self):
+        q = self.project / "q.txt"
+        q.write_text("how do i rotate the deploy token\n", encoding="utf-8")
+        self.run_cli(["--snapshot", str(self.snap), "--queries", str(q)])
+        data = json.loads(self.snap.read_text(encoding="utf-8"))
+        self.assertNotIn("how do i rotate the deploy token", data["primaries"])
+        self.assertIn("how do i rotate the deploy token", data["queries"])
+
+    def test_a_v1_snapshot_still_compares(self):
+        self.snapshot()
+        data = json.loads(self.snap.read_text(encoding="utf-8"))
+        del data["primaries"]
+        data["version"] = 1
+        self.snap.write_text(json.dumps(data), encoding="utf-8")
+        rc, out = self.run_cli(["--compare", str(self.snap)])
+        self.assertEqual(rc, 0, out)
+
     def test_compare_rejects_a_file_that_is_not_a_snapshot(self):
         bad = self.project / "bad.json"
         bad.write_text('{"nope": 1}', encoding="utf-8")
