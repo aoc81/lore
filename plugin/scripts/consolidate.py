@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (LOG_NAME, body_words, find_project_dir,  # noqa: E402
                      iter_consolidated, iter_entries, load_config,
                      personal_store, rel_path, resolve_consolidated,
-                     store_dirs)
+                     shell_safe, store_dirs)
 from recall import rank_matches  # noqa: E402
 
 SNAPSHOT_VERSION = 1
@@ -345,15 +345,6 @@ def _prunable(project, entries, consolidated, stale_set):
     return out
 
 
-# A path safe to paste into any shell unquoted. The store is committed, so its
-# filenames come from the repo -- a crafted name could otherwise turn the
-# `git rm` line below into whatever its author wanted, and that line exists to
-# be copied into a terminal. Cross-platform quoting is not worth attempting
-# (shlex is POSIX-only, and this prints on Windows too), so anything outside
-# this set is listed for manual deletion instead of being quoted.
-_SHELL_SAFE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
-
-
 def cmd_prune(project, cfg, entries, consolidated):
     stale_set = set(cfg["staleStatuses"])
     cands = _prunable(project, entries, consolidated, stale_set)
@@ -379,7 +370,7 @@ def cmd_prune(project, cfg, entries, consolidated):
         rel = rel_path(project, e["path"])
         rels.append(rel)
         print(f"  - {rel}  [{e['status']}] -> {target['title']}")
-    safe = [r for r in rels if _SHELL_SAFE.match(r)]
+    safe = [r for r in rels if shell_safe(r)]
     unsafe = [r for r in rels if r not in safe]
     print("")
     print("  Review each one, then delete the ones you agree with:")
