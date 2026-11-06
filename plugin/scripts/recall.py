@@ -32,6 +32,16 @@ configured, the private `personalStoreDir` -- so a personal preference can be
 recalled without being published in a teammate's PR. Personal entries are
 flagged `[personal]` when surfaced.
 
+It also reads the CONSOLIDATED layer when `consolidatedDirs` is configured:
+topic skills distilled from many entries by `/lore:consolidate`, indexed on
+their `name` + `description` (and their `tags:`/`files:` when they carry them,
+which is what keeps edit-time recall working). They surface flagged
+`[consolidated]`, rank ahead of the entries they absorbed, and REPLACE those
+entries only when they matched the same prompt or file -- an absorbed entry
+that is the only thing matching a path is still surfaced, so consolidating can
+never make a lesson unreachable. With `consolidatedDirs` unset there is no
+consolidated layer and every path below behaves as it did in 0.5.1.
+
 Matching is word-boundary, not substring: an exact word hit scores 2, a >=4-char
 prefix overlap (stemming-ish: "test"/"testing") scores 1, and an entry needs a
 score of 2 to surface at all -- so "auth" never matches "author" and one weak
@@ -61,9 +71,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (find_project_dir, fold, git_dirs,  # noqa: E402
-                     is_under, iter_store_entries, load_config, norm_rel,
-                     ref_exists, ref_matches, rel_path, revisit_due,
+from _common import (consolidated_paths, find_project_dir, fold,  # noqa: E402
+                     git_dirs, is_under, iter_consolidated,
+                     iter_store_entries, load_config, norm_rel, ref_exists,
+                     ref_matches, rel_path, resolve_consolidated, revisit_due,
                      store_dirs, words)
 
 # Generic words that would over-match. Domain words are intentionally absent.
@@ -169,8 +180,14 @@ def score_entry(tokens, short, e):
     overlap = 1). short: 2-3 char prompt words, matched only against exact
     tag words -- tags are curated, so "ci"/"api"/"aws" stay findable without
     letting short common words over-match titles.
+
+    An entry is matched on its title; a consolidated skill overrides that with
+    `match_text` -- its discriminating name words plus its `description`, one
+    curated line whose whole job is to say when the skill applies, so it is
+    matched like a title. Entries carry no `match_text` and score as before.
     """
-    hay_words = set(words(e["title"] + " " + " ".join(e["tags"])))
+    hay_words = set(words((e.get("match_text") or e["title"])
+                          + " " + " ".join(e["tags"])))
     if not hay_words:
         return 0
     long_hay = [w for w in hay_words if len(w) >= 4]
@@ -191,12 +208,66 @@ def stop_words(cfg):
     return STOP | {fold(w) for w in cfg["stopWords"] if w.strip()}
 
 
-def rank_matches(text, stores, cfg):
+def absorb_consolidated(project, matched, merge=None):
+    """Collapse entry/skill overlap: the skill speaks for the entries it absorbed.
+
+    `matched` is `[((score, ...), entry), ...]`. An entry marked
+    `consolidated_into: <skill>` is dropped WHEN that skill is itself among the
+    matches -- there, the skill is the shorter, current statement of the same
+    rules, and showing both spends context twice on one lesson. The absorbed
+    `merge(skill_weight, entry_weight)` decides what the absorbing skill's
+    weight becomes -- prompt recall hands the skill the better of the two
+    scores, so taking an entry's place never costs the skill that entry's rank.
+    Omitted, the skill keeps its own weight (edit-time recall, where the weight
+    is a sort bucket and not a score).
+
+    When the skill did NOT match, the entry stays. That is the whole safety
+    property: consolidation must not make a lesson unreachable, so the original
+    is still surfaced whenever it is the only thing that matches -- most
+    importantly at edit time, where the entry's `files:` may name a path the
+    skill's frontmatter does not.
+
+    Returns the filtered list, same shape.
+    """
+    skills = [e for _w, e in matched if e.get("consolidated")]
+    if not skills:
+        return matched
+    # Index the skills BEFORE walking the entries: the skill that absorbs an
+    # entry can appear after it in `matched`, and a one-pass version would drop
+    # the entry without ever handing its rank over.
+    slot_of = {id(e): i for i, (_w, e) in enumerate(matched)
+               if e.get("consolidated")}
+    items = [[w, e] for w, e in matched]
+    absorbed = set()
+    for i, (weight, e) in enumerate(matched):
+        if e.get("consolidated") or not e.get("consolidated_into"):
+            continue
+        target = resolve_consolidated(project, e, skills)
+        slot = slot_of.get(id(target)) if target is not None else None
+        if slot is None:
+            continue  # the skill did not match -- the entry is all there is
+        absorbed.add(i)
+        if merge is not None:
+            items[slot][0] = merge(items[slot][0], weight)
+    return [(w, e) for i, (w, e) in enumerate(items) if i not in absorbed]
+
+
+def _better_score(skill_weight, entry_weight):
+    """Keep the skill's own sort buckets, but the better of the two scores."""
+    return (max(skill_weight[0], entry_weight[0]),) + tuple(skill_weight[1:])
+
+
+def rank_matches(text, stores, cfg, consolidated=(), project=None):
     """Rank entries by title+tags word overlap with `text`.
 
     Returns [(stale_bool, entry), ...] best-first, capped to maxRecall.
     Same scorer for the prompt hook and the capture-time overlap check.
     `stores` is `store_dirs()`'s list (team + personal) or a single store path.
+
+    `consolidated` is `iter_consolidated()`'s entries -- the topic skills, which
+    are ranked alongside the store and preferred over the entries they absorbed
+    (see `absorb_consolidated`). Omitted, it is empty and this is the 0.5.1
+    behaviour exactly.
     """
     stop = stop_words(cfg)
     toks = words(text)
@@ -204,20 +275,27 @@ def rank_matches(text, stores, cfg):
     short = {w for w in toks if 2 <= len(w) < 4 and w not in stop}
     if not tokens and not short:
         return []
+    if project is None:
+        project = find_project_dir()
     stale_set = set(cfg["staleStatuses"])
     found = []
-    for e in iter_store_entries(stores):
+    for e in list(iter_store_entries(stores)) + list(consolidated):
         score = score_entry(tokens, short, e)
         if score >= MIN_SCORE:
             stale = e["status"] in stale_set
-            # rank: effective score (stale -1), current-before-stale on ties
-            found.append((score - (1 if stale else 0), 1 if stale else 0,
-                          stale, e))
-    found.sort(key=lambda r: (-r[0], r[1]))
-    return [(stale, e) for _eff, _s, stale, e in found[: cfg["maxRecall"]]]
+            # rank: effective score (stale -1), current-before-stale on ties,
+            # then the consolidated skill ahead of a plain entry
+            found.append(((score - (1 if stale else 0),
+                           1 if stale else 0,
+                           0 if e.get("consolidated") else 1), e))
+    # absorb BEFORE the cap: an entry dropped for its skill must not cost the
+    # result set a slot, and the skill must inherit its rank first.
+    found = absorb_consolidated(project, found, merge=_better_score)
+    found.sort(key=lambda r: (-r[0][0], r[0][1], r[0][2]))
+    return [(e["status"] in stale_set, e) for _w, e in found[: cfg["maxRecall"]]]
 
 
-def match_by_file(targets, stores, cfg):
+def match_by_file(targets, stores, cfg, consolidated=(), project=None):
     """Learnings whose frontmatter `files:` covers any of `targets`, best-first.
 
     A ref matches as an exact path, a directory prefix (`src/auth/`), or a
@@ -229,17 +307,28 @@ def match_by_file(targets, stores, cfg):
     Current entries sort before stale ones (`staleStatuses` from cfg, same as
     the prompt scorer) so that truncating to `maxRecall` can never drop a live
     learning in favour of a superseded one; ties keep store order.
+
+    A consolidated skill competes here on the same terms -- on its own `files:`,
+    which is why /lore:consolidate carries the absorbed entries' refs into the
+    skill's frontmatter. It is preferred over the entries it absorbed, but only
+    when its OWN refs cover the file being edited: an entry whose `files:` names
+    a path the skill's does not is still the only thing that knows about that
+    path, and is surfaced.
     """
     if isinstance(targets, str):
         targets = [targets]
+    if project is None:
+        project = find_project_dir()
     stale_set = set(cfg["staleStatuses"])
     matches = []
-    for e in iter_store_entries(stores):
+    for e in list(iter_store_entries(stores)) + list(consolidated):
         refs = [f for f in e["files"] if f]
         if any(ref_matches(f, t) for f in refs for t in targets):
-            matches.append((e["status"] in stale_set, e))
-    matches.sort(key=lambda m: m[0])  # stable: False (current) first
-    return matches
+            matches.append(((e["status"] in stale_set,
+                             0 if e.get("consolidated") else 1), e))
+    matches = absorb_consolidated(project, matches)
+    matches.sort(key=lambda m: m[0])  # current first, then the skill
+    return [(e["status"] in stale_set, e) for _w, e in matches]
 
 
 def _safe_title(title):
@@ -255,6 +344,8 @@ def _format_entry(e, stale, project, cfg):
     bits = []
     if stale:
         bits.append("SUPERSEDED -- apply the principle, not the file/code refs")
+    if e.get("consolidated"):
+        bits.append("consolidated")
     if e.get("personal"):
         bits.append("personal")
     bits.extend(freshness_flags(e, project, cfg))
@@ -350,6 +441,17 @@ def _live_stores(project, cfg):
     return [(s, p) for s, p in store_dirs(project, cfg) if s.is_dir()]
 
 
+def _layers(project, cfg):
+    """`(stores, consolidated)` -- everything recall can search right now.
+
+    Either half may be empty: a project that has consolidated into skills and
+    pruned nothing has both, a fresh project has only the store, and a project
+    whose entries all live in skills has only the consolidated layer. The hooks
+    bail only when BOTH are empty.
+    """
+    return _live_stores(project, cfg), list(iter_consolidated(project, cfg))
+
+
 def run_hook():
     raw = sys.stdin.read()
     if not raw.strip():
@@ -363,10 +465,10 @@ def run_hook():
         return
     project = find_project_dir(data)
     cfg = load_config(project)
-    stores = _live_stores(project, cfg)
-    if not stores:
+    stores, consolidated = _layers(project, cfg)
+    if not stores and not consolidated:
         return
-    matches = rank_matches(prompt, stores, cfg)
+    matches = rank_matches(prompt, stores, cfg, consolidated, project)
     if not matches:
         return
     log_recall(project, "prompt", [e["path"] for _s, e in matches])
@@ -386,11 +488,11 @@ def run_hook():
 def run_query(text):
     project = find_project_dir()
     cfg = load_config(project)
-    stores = _live_stores(project, cfg)
-    if not stores:
+    stores, consolidated = _layers(project, cfg)
+    if not stores and not consolidated:
         print("No learnings store found.")
         return
-    matches = rank_matches(text, stores, cfg)
+    matches = rank_matches(text, stores, cfg, consolidated, project)
     if not matches:
         print("No related learnings found -- looks new; create a fresh entry.")
         return
@@ -451,11 +553,11 @@ def run_pretool():
         return
     project = find_project_dir(data)
     cfg = load_config(project)
-    stores = _live_stores(project, cfg)
-    if not stores:
+    stores, consolidated = _layers(project, cfg)
+    if not stores and not consolidated:
         return
     rels = [_project_rel(project, t) for t in targets]
-    matches = match_by_file(rels, stores, cfg)
+    matches = match_by_file(rels, stores, cfg, consolidated, project)
     if not matches:
         return  # stay silent unless a learning names this file
     # sorted current-first by match_by_file, so the cap drops stale entries
@@ -502,7 +604,10 @@ def run_posttool():
         return
     project = find_project_dir(data)
     cfg = load_config(project)
-    if not any(is_under(store, fp) for store, _p in store_dirs(project, cfg)):
+    inside = (any(is_under(store, fp) for store, _p in store_dirs(project, cfg))
+              or any(is_under(c.parent, fp)
+                     for c in consolidated_paths(project, cfg)))
+    if not inside:
         return  # an ordinary source file -- not our telemetry
     log_recall(project, "read", [Path(fp)])
 

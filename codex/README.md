@@ -24,6 +24,7 @@ it's a missing tool rather than a missing hook: see
 | Capture guidance (skill) | Agent Skill (`SKILL.md`) | Installed to `~/.agents/skills/lore/`. |
 | Freshness linter | `verify_refs.py` | Run directly: `python3 ~/.codex/lore/verify_refs.py [--report\|--stats\|--dupes\|--index\|--strict]`. |
 | Cold-start mining | `mine_history.py` | Run directly: `python3 ~/.codex/lore/mine_history.py [--since …]`, then write the entries via the skill (the Claude target wraps this as `/lore:mine`). |
+| Consolidation | `consolidate.py` | Run directly: `python3 ~/.codex/lore/consolidate.py [--plan\|--snapshot FILE\|--compare FILE\|--mark SKILL ENTRY…\|--prune\|--log TEXT]`. The deterministic half of the Claude target's `/lore:consolidate`: grouping and writing the summaries is the agent's job, and on Codex you drive the steps yourself (there is no slash command). Recall reads the resulting skills through `consolidatedDirs`, on both targets. |
 | Secret scan | `scan_secrets.py` | Run directly: `python3 ~/.codex/lore/scan_secrets.py` before sharing the store; `--ci` installs the same check as a PR gate. |
 | Store | `learnings/` markdown | Per-project, tool-agnostic — created on first capture or via `--store`. Plus the optional private `personalStoreDir`, read by recall the same way. |
 
@@ -101,13 +102,18 @@ Uninstall: `python3 codex/install.py --uninstall` (leaves your stores and the
 - **No `/lore:*` slash commands.** Codex custom prompts are user-local and can't be
   namespaced/shared, so the Claude commands map to: install script (`init`), the
   `lore` skill + Stop hook (`capture`), and direct `verify_refs.py` /
-  `mine_history.py` calls (`lint`, `mine`).
-- **Config/paths:** `.lore.json` (`staleStatuses`, `staleAfterMonths`, `stopWords`, …)
+  `mine_history.py` / `consolidate.py` calls (`lint`, `mine`, `consolidate`).
+  For `consolidate`, follow the steps in
+  [plugin/commands/consolidate.md](../plugin/commands/consolidate.md) by hand --
+  above all `--snapshot` before and `--compare` after, which is what proves the
+  pass did not make a learning unreachable.
+- **Config/paths:** `.lore.json` (`staleStatuses`, `staleAfterMonths`, `stopWords`,
+  `consolidatedDirs`, …)
   and the `learnings/` layout are identical to the Claude target — the [shared core](../plugin/scripts/) is the same code.
 
 ## What's shared vs Codex-specific
 
-- **Shared (unchanged):** `plugin/scripts/{recall,capture_check,verify_refs,scan_secrets,mine_history,_common}.py`,
+- **Shared (unchanged):** `plugin/scripts/{recall,capture_check,verify_refs,scan_secrets,mine_history,consolidate,_common}.py`,
   `plugin/skills/lore/SKILL.md`, `plugin/templates/*` (incl. the CI workflow),
   the store format.
 - **Codex-specific:** this folder — `install.py`, `hooks.example.json`, and this README.

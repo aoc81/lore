@@ -13,7 +13,7 @@ from unittest import mock
 
 import _util  # noqa: F401
 from _common import DEFAULTS, iter_entries
-from _util import write_entry
+from _util import write_entry, write_skill
 import verify_refs
 
 GIT = shutil.which("git")
@@ -401,6 +401,140 @@ class TestPersonalOnlyStore(unittest.TestCase):
         rc, text = self._run(self._project(with_team_store=True))
         self.assertEqual(rc, 0)
         self.assertIn("all entries have valid frontmatter file refs", text)
+
+
+class TestConsolidationChecks(unittest.TestCase):
+    """The linter's half of the consolidated layer.
+
+    Both links it creates can rot, in opposite directions, and both are silent:
+    an entry stamped for a skill that is gone, and a skill citing a learning
+    that is gone (a rule whose evidence has vanished).
+    """
+
+    def _run(self, proj, *argv):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(proj)}), \
+                mock.patch("sys.argv", ["verify_refs.py", *argv]), \
+                contextlib.redirect_stdout(out):
+            rc = verify_refs.main()
+        return rc, out.getvalue()
+
+    def _project(self, consolidated_dirs=(".claude/skills/lore-*",)):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        cfg = {}
+        if consolidated_dirs:
+            cfg["consolidatedDirs"] = list(consolidated_dirs)
+        (proj / ".lore.json").write_text(json.dumps(cfg), encoding="utf-8")
+        (proj / "learnings").mkdir()
+        return proj
+
+    def test_clean_layer_passes_and_says_what_it_checked(self):
+        proj = self._project()
+        write_entry(proj / "learnings", "ci/a.md", title="A", tags=("ci",),
+                    consolidated_into="lore-ci")
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",))
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 0)
+        self.assertIn("1 consolidated skills", text)
+
+    def test_stamp_pointing_at_a_missing_skill_is_actionable(self):
+        proj = self._project()
+        write_entry(proj / "learnings", "ci/a.md", title="A", tags=("ci",),
+                    consolidated_into="lore-nope")
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 1)
+        self.assertIn("point at a skill that does not exist", text)
+        self.assertIn("lore-nope", text)
+
+    def test_unset_consolidated_dirs_is_named_as_the_cause(self):
+        # Stamped entries with no `consolidatedDirs` is the misconfiguration
+        # that makes every skill invisible to recall -- say so, don't just list
+        # 400 dangling stamps.
+        proj = self._project(consolidated_dirs=())
+        write_entry(proj / "learnings", "ci/a.md", title="A", tags=("ci",),
+                    consolidated_into="lore-ci")
+        write_skill(proj, "lore-ci", description="CI")
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 1)
+        self.assertIn("`consolidatedDirs` is not set", text)
+
+    def test_skill_citing_a_deleted_learning_is_actionable(self):
+        proj = self._project()
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",),
+                    body="- rule ([x](../../../learnings/ci/gone.md))")
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 1)
+        self.assertIn("cite a learning that is gone", text)
+        self.assertIn("learnings/ci/gone.md", text)
+
+    def test_a_citation_written_twice_is_one_issue(self):
+        proj = self._project()
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",),
+                    body="- rule ([learnings/ci/gone.md]"
+                         "(../../../learnings/ci/gone.md))")
+        _rc, text = self._run(proj)
+        self.assertEqual(text.count("cited learning no longer exists"), 1)
+
+    def test_a_live_citation_passes(self):
+        proj = self._project()
+        write_entry(proj / "learnings", "ci/here.md", title="Here", tags=("ci",))
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",),
+                    body="- rule ([here](../../../learnings/ci/here.md))")
+        rc, _text = self._run(proj, "--strict")
+        self.assertEqual(rc, 0)
+
+    def test_links_outside_the_store_are_not_checked(self):
+        proj = self._project()
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",),
+                    body="see [the docs](../../../docs/missing.md)")
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("cite a learning", text)
+
+    def test_skill_file_refs_are_existence_checked(self):
+        proj = self._project()
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",),
+                    files=("gone/path.yml",))
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 1)
+        self.assertIn("[consolidated skill]", text)
+        self.assertIn("gone/path.yml", text)
+
+    def test_oversize_skill_is_a_note_not_a_failure(self):
+        proj = self._project()
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",),
+                    body=" ".join(["word"] * 501))
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 0, "a long skill is untidy, not broken")
+        self.assertIn("over the 500-word limit", text)
+
+    def test_stats_counts_consolidated_and_not(self):
+        proj = self._project()
+        write_entry(proj / "learnings", "ci/a.md", title="A", tags=("ci",),
+                    consolidated_into="lore-ci")
+        write_entry(proj / "learnings", "ci/b.md", title="B", tags=("ci",))
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",),
+                    files=("x.yml",))
+        rc, text = self._run(proj, "--stats")
+        self.assertEqual(rc, 0)
+        self.assertIn("consolidation:", text)
+        self.assertIn("current entries consolidated: 1 / 2", text)
+        self.assertIn("(1 not yet)", text)
+
+    def test_stats_is_silent_without_a_consolidated_layer(self):
+        proj = self._project(consolidated_dirs=())
+        write_entry(proj / "learnings", "ci/a.md", title="A", tags=("ci",))
+        rc, text = self._run(proj, "--stats")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("consolidation:", text)
+
+    def test_stats_flags_skills_without_file_refs(self):
+        proj = self._project()
+        write_skill(proj, "lore-ci", description="CI", tags=("ci",))
+        _rc, text = self._run(proj, "--stats")
+        self.assertIn("without `files:`: 1", text)
 
 
 @unittest.skipUnless(GIT, "git not available")

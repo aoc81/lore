@@ -8,7 +8,10 @@ Modes:
               missing file or a bad value on a non-stale entry; missing files on
               superseded entries are expected/informational). Also reports
               `.lore.json` keys the hooks silently ignore (a typo like
-              `maxRecal`), which is invisible at hook time by design.
+              `maxRecal`), which is invisible at hook time by design, and the two
+              ways the consolidated layer rots: an entry whose
+              `consolidated_into:` names a skill that does not exist, and a
+              skill citing a learning that has been deleted.
   --report    Drift triage -- for each current entry, use `git log` to find
               referenced files changed AFTER the entry's `verified:` (or `date:`)
               baseline, ranked by gap. Best candidates for a re-verify. Heuristic.
@@ -16,7 +19,8 @@ Modes:
               entries unverified for a long time, recall activity (from the local
               `.git/lore-recall.log`: surfaced vs actually READ, plus entries
               that keep surfacing and never get opened), near-duplicate count,
-              and a soft dangling-link count. Also counts the private
+              and a soft dangling-link count. Reports how many entries are
+              consolidated and how many are not. Also counts the private
               `personalStoreDir`, which no other mode touches.
   --dupes     Near-duplicate report -- entry pairs whose title+tags share enough
               vocabulary to be merge candidates, plus category names that look
@@ -41,10 +45,11 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (DEFAULTS, config_issues, find_project_dir,  # noqa: E402
-                     git_dirs, iter_entries, load_config, norm_rel,
-                     personal_store, ref_exists, ref_matches, rel_path,
-                     revisit_due, stale_after_days, words)
+from _common import (DEFAULTS, body_words, config_issues,  # noqa: E402
+                     find_project_dir, git_dirs, iter_consolidated,
+                     iter_entries, load_config, norm_rel, personal_store,
+                     ref_exists, ref_matches, rel_path, resolve_consolidated,
+                     revisit_due, skill_body, stale_after_days, words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -186,10 +191,127 @@ def _value_problems(e, cfg):
     return problems
 
 
-def cmd_check(entries, project, cfg, strict):
+# --- the consolidated layer --------------------------------------------------
+# /lore:consolidate distils entries into topic skills and stamps the entries it
+# absorbed with `consolidated_into:`. That creates two links that can rot in
+# opposite directions, and both are silent failures: an entry pointing at a
+# skill that is gone is an entry recall now DOWN-ranks for nothing, and a skill
+# citing an entry that is gone is a rule whose evidence has vanished.
+
+# A skill cites its sources as links to entry files. Catch the markdown-link
+# form and a bare path; both must resolve, since the citation is the only route
+# from a one-line rule back to its root cause.
+_LINK_RE = re.compile(r"\(([^()\s]+\.md)(?:#[^()]*)?\)|(?<![\w/(])"
+                      r"((?:\.{0,2}/)?(?:[\w.\-]+/)+[\w.\-]+\.md)")
+
+
+def _skill_entry_links(project, skill, store):
+    """Entry paths a skill cites that no longer exist.
+
+    Links are resolved relative to the skill file first (how a markdown link
+    actually reads) and then relative to the project root. Only links that land
+    inside the store are checked -- a skill may link to anything else, and a
+    missing README is not our business. Deduped by RESOLVED target, since one
+    citation is usually written twice over (`[learnings/x.md](../../x.md)`) and
+    is still one broken link.
+    """
+    store = Path(store).resolve()
+    # Candidates are resolved, so the display path has to be relative to the
+    # RESOLVED project -- against the raw one (a symlink, or `cwd` as the hook
+    # reported it) relative_to fails and every broken link prints absolute.
+    try:
+        root = Path(project).resolve()
+    except OSError:
+        root = Path(project)
+    missing = {}
+    for m in _LINK_RE.finditer(skill_body(skill["path"])):
+        raw = m.group(1) or m.group(2)
+        if not raw:
+            continue
+        for base in (Path(skill["path"]).parent, Path(project)):
+            try:
+                cand = (base / raw).resolve()
+            except OSError:
+                continue
+            try:
+                cand.relative_to(store)
+            except ValueError:
+                continue  # not a store path under this base
+            if not cand.exists():
+                missing.setdefault(cand, rel_path(root, cand))
+            break
+    return list(missing.values())
+
+
+def consolidation_issues(project, cfg, entries, consolidated):
+    """`(dangling_into, missing_links, oversize)` across the consolidated layer.
+
+    dangling_into: entries whose `consolidated_into:` names no visible skill.
+    missing_links: `(skill, [cited entry paths that are gone])`.
+    oversize:      `(skill, words)` over `consolidatedMaxWords`.
+    """
+    dangling = [e for e in entries
+                if e["consolidated_into"]
+                and resolve_consolidated(project, e, consolidated) is None]
+    store = Path(project) / cfg["storeDir"]
+    missing_links, oversize = [], []
+    for c in consolidated:
+        gone = _skill_entry_links(project, c, store)
+        if gone:
+            missing_links.append((c, gone))
+        n = body_words(c["path"])
+        if n > cfg["consolidatedMaxWords"]:
+            oversize.append((c, n))
+    return dangling, missing_links, oversize
+
+
+def _print_consolidation_issues(project, cfg, dangling, missing_links, oversize):
+    """Report the three consolidation faults; returns True if any was actionable."""
+    actionable = False
+    if dangling:
+        actionable = True
+        print(f"\nconsolidation: {len(dangling)} entr(ies) point at a skill that "
+              "does not exist:")
+        for e in dangling:
+            print(f"  {rel_path(project, e['path'])}")
+            print(f"    - consolidated_into: {e['consolidated_into']}")
+        if not cfg["consolidatedDirs"]:
+            print("\n  -> `consolidatedDirs` is not set in .lore.json, so NO skill is")
+            print("     visible to recall. Set it, or drop the stamps:")
+            print('     { "consolidatedDirs": [".claude/skills/lore-*"] }')
+        else:
+            print("\n  -> Create the skill, fix the name, or remove the stamp. Until")
+            print("     then recall prefers nothing and the entry is just an entry.")
+    if missing_links:
+        actionable = True
+        print(f"\nconsolidation: {len(missing_links)} skill(s) cite a learning that "
+              "is gone:")
+        for c, gone in missing_links:
+            print(f"  {rel_path(project, c['path'])}")
+            for g in gone:
+                print(f"    - cited learning no longer exists: {g}")
+        print("\n  -> The rule lost its evidence. Restore the entry, or fold its root")
+        print("     cause into the skill and drop the dead link.")
+    if oversize:
+        limit = cfg["consolidatedMaxWords"]
+        print(f"\nnote: {len(oversize)} consolidated skill(s) over the "
+              f"{limit}-word limit:")
+        for c, n in sorted(oversize, key=lambda t: -t[1]):
+            print(f"  - {rel_path(project, c['path'])} ({n} words)"
+                  "  -> split it by sub-topic")
+    return actionable
+
+
+# --- default mode: file-ref existence check ----------------------------------
+
+def cmd_check(entries, project, cfg, strict, consolidated=()):
     stale_set = set(cfg["staleStatuses"])
+    consolidated = list(consolidated)
     issues, bad_values, missing_refs = [], False, False
-    for e in entries:
+    # Skills are checked on the same terms as entries: a `files:` list that has
+    # rotted is exactly as misleading there, and worse -- a skill's refs are
+    # what drive edit-time recall for a whole topic.
+    for e in entries + consolidated:
         actionable = e["status"] not in stale_set
         if actionable:  # retired entries drive no guidance and no freshness
             for problem in _value_problems(e, cfg):
@@ -200,11 +322,17 @@ def cmd_check(entries, project, cfg, strict):
                 issues.append((e, f"referenced file no longer exists: {ref}",
                                actionable))
                 missing_refs = True
+    cons_issues = consolidation_issues(project, cfg, entries, consolidated)
     notes = [n for n in (config_warning(project), version_warning(project),
                          personal_store_warning(project, cfg)) if n]
-    if not issues:
-        if entries:
-            print("OK  learnings: all entries have valid frontmatter file refs.")
+    if not issues and not any(cons_issues):
+        if entries or consolidated:
+            # Name what was examined: with a consolidated layer, "all entries
+            # are valid" would quietly leave out half of what recall reads.
+            extra = (f" (+ {len(consolidated)} consolidated skills)"
+                     if consolidated else "")
+            print("OK  learnings: all entries have valid frontmatter file "
+                  f"refs{extra}.")
         else:
             # "all entries are valid" after checking none reads as a clean bill
             # of health. Say what was actually examined -- the personal store is
@@ -216,24 +344,28 @@ def cmd_check(entries, project, cfg, strict):
             print(f"  {n}")
         return 0
     actionable = [i for i in issues if i[2]]
-    print(f"\nlearnings check: {len(issues)} issue(s), {len(actionable)} actionable:")
-    cur = None
-    for e, problem, act in issues:
-        rel = e["path"].relative_to(project).as_posix()
-        if rel != cur:
-            print(f"\n  {rel} [status: {e['status'] or 'current'}]")
-            cur = rel
-        note = "" if act else f"  (expected -- entry is {e['status']})"
-        print(f"    - {problem}{note}")
-    if missing_refs:
-        print("\n  -> A 'current' entry with a missing file is likely STALE: fix the path,")
-        print("     mark status: superseded, or re-verify the claim against the code.")
-    if bad_values:
-        print("\n  -> Fix the value: a typo'd status is served as live guidance, and a")
-        print("     malformed date silently turns off the entry's freshness checks.")
+    if issues:
+        print(f"\nlearnings check: {len(issues)} issue(s), "
+              f"{len(actionable)} actionable:")
+        cur = None
+        for e, problem, act in issues:
+            rel = e["path"].relative_to(project).as_posix()
+            if rel != cur:
+                kind = " [consolidated skill]" if e.get("consolidated") else ""
+                print(f"\n  {rel} [status: {e['status'] or 'current'}]{kind}")
+                cur = rel
+            note = "" if act else f"  (expected -- entry is {e['status']})"
+            print(f"    - {problem}{note}")
+        if missing_refs:
+            print("\n  -> A 'current' entry with a missing file is likely STALE: fix the path,")
+            print("     mark status: superseded, or re-verify the claim against the code.")
+        if bad_values:
+            print("\n  -> Fix the value: a typo'd status is served as live guidance, and a")
+            print("     malformed date silently turns off the entry's freshness checks.")
+    cons_actionable = _print_consolidation_issues(project, cfg, *cons_issues)
     for n in notes:
         print(f"  {n}")
-    return 1 if (strict and actionable) else 0
+    return 1 if (strict and (actionable or cons_actionable)) else 0
 
 
 # --- drift triage (git) ------------------------------------------------------
@@ -530,7 +662,47 @@ def _personal_entries(project, cfg):
     return list(iter_entries(p, personal=True))
 
 
-def cmd_stats(entries, project, cfg, store):
+def _print_consolidation_stats(project, cfg, entries, consolidated):
+    """The consolidated-vs-not split. Silent when the project never consolidates.
+
+    Printed whenever there is either a consolidated layer or an entry that
+    claims to be in one -- the second case without the first is precisely the
+    misconfiguration worth seeing here (stamped entries, no `consolidatedDirs`,
+    so recall sees no skill at all).
+    """
+    stamped = [e for e in entries if e["consolidated_into"]]
+    if not consolidated and not stamped:
+        return
+    stale_set = set(cfg["staleStatuses"])
+    live = [e for e in entries if e["status"] not in stale_set]
+    done = [e for e in live
+            if resolve_consolidated(project, e, consolidated) is not None]
+    dangling, missing_links, oversize = consolidation_issues(
+        project, cfg, entries, consolidated)
+    limit = cfg["consolidatedMaxWords"]
+    where = ", ".join(cfg["consolidatedDirs"]) or "(consolidatedDirs unset)"
+    print("  consolidation:")
+    widest = max((body_words(c["path"]) for c in consolidated), default=0)
+    print(f"    consolidated skills: {len(consolidated)}  ({where})")
+    if consolidated:
+        tail = f", {len(oversize)} over it" if oversize else ""
+        print(f"      largest {widest} words, limit {limit}{tail}")
+        no_refs = sum(1 for c in consolidated if not c["files"])
+        if no_refs:
+            print(f"      without `files:`: {no_refs}"
+                  "   -> invisible to edit-time recall")
+    print(f"    current entries consolidated: {len(done)} / {len(live)}"
+          f"   ({len(live) - len(done)} not yet)")
+    if dangling:
+        print(f"    ! consolidated_into points at a missing skill: "
+              f"{len(dangling)}   -> verify_refs.py (no args)")
+    if missing_links:
+        print(f"    ! skills citing a deleted learning: {len(missing_links)}"
+              "   -> verify_refs.py (no args)")
+    print("")
+
+
+def cmd_stats(entries, project, cfg, store, consolidated=()):
     stale_set = set(cfg["staleStatuses"])
     stale_days = stale_after_days(cfg)
     by_status, by_cat = {}, {}
@@ -582,8 +754,10 @@ def cmd_stats(entries, project, cfg, store):
         rel = oldest[1]["path"].relative_to(project).as_posix()
         print(f"    oldest stamp: {rel}  (~{oldest[0] // 30}mo)")
     print("")
+    consolidated = list(consolidated)
+    _print_consolidation_stats(project, cfg, entries, consolidated)
     personal = _personal_entries(project, cfg)
-    activity = _recall_activity(entries + personal, project)
+    activity = _recall_activity(entries + personal + consolidated, project)
     if activity is not None:
         top, never, unread = activity
         print("  recall activity (local .git/lore-recall.log):")
@@ -687,15 +861,21 @@ def main():
                   f"(the personal store is never indexed).")
             return 0
     entries = list(iter_entries(store)) if store.is_dir() else []
+    # The consolidated layer is empty unless `consolidatedDirs` is configured,
+    # which is what keeps every mode below identical for a project that never
+    # consolidates. --report and --dupes stay entry-only on purpose: drift is
+    # measured against an entry's `verified:` baseline, and a skill is SUPPOSED
+    # to share vocabulary with the entries it absorbed.
+    consolidated = list(iter_consolidated(project, cfg))
     if args.index:
         return cmd_index(entries, project, cfg, store)
     if args.stats:
-        return cmd_stats(entries, project, cfg, store)
+        return cmd_stats(entries, project, cfg, store, consolidated)
     if args.dupes:
         return cmd_dupes(entries, project)
     if args.report:
         return cmd_report(entries, project, cfg)
-    return cmd_check(entries, project, cfg, args.strict)
+    return cmd_check(entries, project, cfg, args.strict, consolidated)
 
 
 if __name__ == "__main__":

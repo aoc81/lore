@@ -32,6 +32,11 @@ After running, call out anything worth acting on and suggest the next step:
   something the body doesn't deliver, so either rewrite the title to match the
   content or drop the entry. (A `reads: not tracked yet` line instead means the
   `PostToolUse` Read hook isn't running — reinstall the plugin to measure it.)
+- a **consolidation** block → how many entries are consolidated and how many aren't,
+  plus the skills' word counts. A skill **without `files:`** is invisible to
+  edit-time recall for the code it describes — add the refs. A **missing skill** or
+  a **skill citing a deleted learning** means the layer has rotted: run `/lore:lint`
+  for the list. A large "not yet" count is the cue for `/lore:consolidate`.
 - a **personal store** line → entries in the private `personalStoreDir`. They're
   recalled alongside the team store but never indexed, linted, or secret-scanned,
   because they're never pushed.

@@ -13,7 +13,7 @@ from unittest import mock
 
 import _util  # noqa: F401
 from _common import DEFAULTS
-from _util import write_entry
+from _util import write_entry, write_skill
 import recall
 
 
@@ -602,6 +602,76 @@ class TestLinkedWorktree(StoreCase):
         log = self.project / ".git" / "lore-recall.log"
         self.assertTrue(log.is_file(), "nothing was logged from the worktree")
         self.assertIn("\tedit\tlearnings/a/e.md", log.read_text(encoding="utf-8"))
+
+
+class TestConsolidatedLayerHooks(StoreCase):
+    """The hooks themselves, driven through stdin with `consolidatedDirs` set."""
+
+    def _configure(self):
+        (self.project / ".lore.json").write_text(
+            json.dumps({"consolidatedDirs": [".claude/skills/lore-*"]}),
+            encoding="utf-8")
+
+    def _pretool(self, path="src/auth/session.py"):
+        return self.context_of(self.run_hook(
+            {"cwd": str(self.project), "session_id": "s1",
+             "tool_name": "Edit",
+             "tool_input": {"file_path": str(self.project / path)}},
+            ["--pretool"]))
+
+    def test_prompt_hook_surfaces_a_skill(self):
+        self._configure()
+        write_skill(self.project, "lore-auth",
+                    description="Token refresh and CORS hosts.",
+                    tags=("auth", "refresh"))
+        ctx = self.context_of(self.run_hook(
+            {"cwd": str(self.project), "prompt": "the token refresh broke"}))
+        self.assertIn("lore-auth", ctx)
+        self.assertIn("consolidated", ctx)
+
+    def test_edit_hook_surfaces_a_skill_by_its_file_refs(self):
+        self._configure()
+        write_skill(self.project, "lore-auth", description="Auth rules.",
+                    tags=("auth",), files=("src/auth/",))
+        self.assertIn("lore-auth", self._pretool())
+
+    def test_hooks_work_with_no_team_store_at_all(self):
+        # A project whose entries all live in skills still gets recall.
+        import shutil
+        shutil.rmtree(self.store)
+        self._configure()
+        write_skill(self.project, "lore-auth", description="Auth rules.",
+                    tags=("auth", "refresh"), files=("src/auth/",))
+        ctx = self.context_of(self.run_hook(
+            {"cwd": str(self.project), "prompt": "the token refresh broke"}))
+        self.assertIn("lore-auth", ctx)
+        self.assertIn("lore-auth", self._pretool())
+
+    def test_skill_read_is_logged_as_telemetry(self):
+        self._configure()
+        p = write_skill(self.project, "lore-auth", description="Auth rules.")
+        (self.project / ".git").mkdir()
+        stdin = sys.stdin
+        sys.stdin = io.StringIO(json.dumps(
+            {"cwd": str(self.project), "tool_name": "Read",
+             "tool_input": {"file_path": str(p)}}))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                recall.run_posttool()
+        finally:
+            sys.stdin = stdin
+        log = (self.project / ".git" / "lore-recall.log").read_text(
+            encoding="utf-8")
+        self.assertIn("\tread\t.claude/skills/lore-auth/SKILL.md", log)
+
+    def test_unconfigured_project_never_reads_skills(self):
+        write_skill(self.project, "lore-auth",
+                    description="Token refresh and CORS hosts.",
+                    tags=("auth", "refresh"), files=("src/auth/",))
+        write_entry(self.store, "a/e.md", title="Unrelated", tags=("widget",))
+        self.assertEqual(self.run_hook(
+            {"cwd": str(self.project), "prompt": "the token refresh broke"}), "")
+        self.assertEqual(self._pretool(), "")
 
 
 if __name__ == "__main__":
