@@ -2,11 +2,14 @@
 import contextlib
 import io
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _util  # noqa: F401
 from _common import DEFAULTS
@@ -15,6 +18,7 @@ import recall
 
 
 CFG = dict(DEFAULTS)
+GIT = shutil.which("git")
 
 
 class StoreCase(unittest.TestCase):
@@ -98,6 +102,23 @@ class TestRankMatches(StoreCase):
         cfg = dict(CFG, maxRecall=3)
         m = recall.rank_matches("widget", self.store, cfg)
         self.assertEqual(len(m), 3)
+
+
+class TestRunQuery(StoreCase):
+    """The capture-time overlap check -- where a new learning meets old ones."""
+
+    def test_hint_covers_a_contradicted_entry(self):
+        # "No backup" must not stay live next to a new "nightly backup" entry.
+        write_entry(self.store, "infra/no-backup.md",
+                    title="No database backup exists", tags=("backup",))
+        out = io.StringIO()
+        with mock.patch.dict(os.environ,
+                             {"CLAUDE_PROJECT_DIR": str(self.project)}), \
+                contextlib.redirect_stdout(out):
+            recall.run_query("nightly database backup with pg_dump")
+        self.assertIn("learnings/infra/no-backup.md", out.getvalue())
+        self.assertIn("contradicts", out.getvalue())
+        self.assertIn("superseded", out.getvalue())
 
 
 class TestStopWords(StoreCase):
@@ -191,6 +212,16 @@ class TestFreshnessFlags(StoreCase):
         cfg = dict(CFG, staleAfterMonths=1)
         self.assertTrue(any("mo ago" in f for f in
                             recall.freshness_flags(e, self.project, cfg)))
+
+    def test_revisit_due_is_flagged_on_live_entries_only(self):
+        def revisit_flags(revisit, status="current"):
+            e = dict(self._entry(status=status), revisit=revisit)
+            return [f for f in recall.freshness_flags(e, self.project, CFG)
+                    if "revisit" in f]
+        self.assertEqual(revisit_flags("2020-01-01"),
+                         ["! revisit due since 2020-01-01"])
+        self.assertEqual(revisit_flags("2999-01-01"), [])
+        self.assertEqual(revisit_flags("2020-01-01", status="superseded"), [])
 
 
 class TestFormatEntry(StoreCase):
@@ -438,12 +469,34 @@ class TestRunHook(StoreCase):
             encoding="utf-8")
         self.assertIn("\tprompt\tlearnings/ci/cache.md", log)
 
+    def test_temporary_decision_past_its_revisit_date_is_marked(self):
+        write_entry(self.store, "infra/no-backup.md",
+                    title="No database backup; owner accepts the risk for now",
+                    tags=("backup", "database"), revisit="2020-01-01")
+        ctx = self.context_of(self.run_hook(
+            {"cwd": str(self.project),
+             "prompt": "do we have a database backup?"}))
+        self.assertIn("learnings/infra/no-backup.md", ctx)
+        self.assertIn("! revisit due since 2020-01-01", ctx)
+
     def test_silent_without_match_or_prompt(self):
         write_entry(self.store, "ci/cache.md", title="Cache key", tags=("cache",))
         self.assertEqual(self.run_hook(
             {"cwd": str(self.project), "prompt": "unrelated topic"}), "")
         self.assertEqual(self.run_hook(
             {"cwd": str(self.project), "prompt": "   "}), "")
+
+    def test_store_found_after_cd_into_a_subdirectory(self):
+        # Hook `cwd` follows the agent's `cd`; recall used to look for the
+        # store only there and went silent for the rest of the session.
+        write_entry(self.store, "ci/cache.md", title="Cache key includes lockfile",
+                    tags=("cache", "lockfile"))
+        (self.project / ".git").mkdir()
+        deep = self.project / "src" / "deep"
+        deep.mkdir(parents=True)
+        ctx = self.context_of(self.run_hook(
+            {"cwd": str(deep), "prompt": "why is the cache stale?"}))
+        self.assertIn("learnings/ci/cache.md - Cache key includes lockfile", ctx)
 
     def test_silent_without_store(self):
         proj = self.project / "empty"
@@ -508,6 +561,47 @@ class TestRunPretool(StoreCase):
         (self.project / ".git" / "lore-recall-seen.json").write_text(
             "{not json", encoding="utf-8")
         self.assertIn("retry loop", self._pretool())
+
+
+@unittest.skipUnless(GIT, "git not available")
+class TestLinkedWorktree(StoreCase):
+    """`git worktree add` checkouts -- how parallel agents usually run.
+
+    `.git` is a FILE there, and dedupe + telemetry used to require a directory:
+    the same learning was re-injected on every edit and nothing was logged.
+    """
+
+    def setUp(self):
+        super().setUp()
+        write_entry(self.store, "a/e.md", title="Watch the retry loop",
+                    files=("src/",))
+        for args in (("init", "-q"), ("add", "."), ("commit", "-q", "-m", "c1")):
+            self._git(*args)
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.wt = Path(td.name) / "wt"
+        self._git("worktree", "add", "-q", str(self.wt))
+
+    def _git(self, *args):
+        subprocess.run([GIT, "-C", str(self.project), "-c", "user.email=t@t",
+                        "-c", "user.name=t", *args],
+                       check=True, capture_output=True)
+
+    def _edit(self):
+        return self.context_of(self.run_hook(
+            {"cwd": str(self.wt), "session_id": "s1", "tool_name": "Edit",
+             "tool_input": {"file_path": str(self.wt / "src" / "a.py")}},
+            ["--pretool"]))
+
+    def test_edit_time_dedupe(self):
+        self.assertIn("retry loop", self._edit())
+        self.assertEqual(self._edit(), "")
+
+    def test_recall_log_lands_in_the_shared_git_dir(self):
+        self._edit()
+        log = self.project / ".git" / "lore-recall.log"
+        self.assertTrue(log.is_file(), "nothing was logged from the worktree")
+        self.assertIn("\tedit\tlearnings/a/e.md", log.read_text(encoding="utf-8"))
 
 
 class TestConsolidatedLayerHooks(StoreCase):

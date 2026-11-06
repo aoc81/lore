@@ -11,10 +11,13 @@ Do a semantic freshness sweep of the learnings store.
    PY=$(command -v python3 || command -v python || command -v py)
    "$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/verify_refs.py" --report
    ```
-   Also run it with no args to catch entries referencing deleted files.
+   Also run it with no args to catch entries referencing deleted files. The report
+   also lists **revisit due** entries: temporary decisions (`revisit:`) whose
+   re-check date has come — candidates too, whether or not their code moved.
 2. For the top candidates (biggest gap first), READ the learning and the code it
    references, then judge whether the claim still holds:
-   - **Still accurate** → bump its `verified:` to today.
+   - **Still accurate** → bump its `verified:` to today. For a due `revisit:`, also set a
+     new `revisit:` date if the decision is still temporary, or drop it if it became permanent.
    - **Path moved, claim holds** → fix the `files:` / inline refs (prefer stable symbols over line numbers), keep `current`.
    - **Architecture changed / claim now wrong** → set `status: superseded`, add a top banner pointing to the new authority, keep the transferable principle.
    - **Bug fixed + prevention already documented** → leave `current` (it's a regression guard).

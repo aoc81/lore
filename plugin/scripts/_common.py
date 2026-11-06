@@ -1,4 +1,5 @@
 """Shared helpers for the lore hooks and scripts (stdlib only)."""
+import datetime
 import fnmatch
 import json
 import os
@@ -33,13 +34,27 @@ _DAYS_PER_MONTH = 30.44
 
 
 def find_project_dir(data=None):
-    """The user's project root: hook stdin `cwd`, else $CLAUDE_PROJECT_DIR, else cwd."""
+    """The user's project root, searched upward from where the agent is.
+
+    The search starts at the hook stdin `cwd`, else $CLAUDE_PROJECT_DIR, else
+    the process cwd. Hook `cwd` follows the agent's `cd` (and `claude` may be
+    launched from a monorepo package), so the store is not necessarily right
+    there: the nearest directory holding `.lore.json` or a default store wins.
+    The search never leaves the enclosing git repository -- a stray
+    `~/learnings` must not answer for an unrelated project -- and outside any
+    repository only the start itself is checked. Nothing found: the start.
+    """
     if data and data.get("cwd"):
-        return Path(data["cwd"])
-    env = os.environ.get("CLAUDE_PROJECT_DIR")
-    if env:
-        return Path(env)
-    return Path.cwd()
+        start = Path(data["cwd"])
+    else:
+        env = os.environ.get("CLAUDE_PROJECT_DIR")
+        start = Path(env) if env else Path.cwd()
+    chain = [start, *start.parents]
+    top = next((i for i, d in enumerate(chain) if (d / ".git").exists()), 0)
+    for d in chain[:top + 1]:
+        if (d / ".lore.json").is_file() or (d / DEFAULTS["storeDir"]).is_dir():
+            return d
+    return start
 
 
 def _valid(key, value):
@@ -104,6 +119,29 @@ def config_issues(project):
 def stale_after_days(cfg):
     """The freshness threshold in days (the linter's unit; recall uses months)."""
     return int(round(cfg["staleAfterMonths"] * _DAYS_PER_MONTH))
+
+
+def revisit_due(e, today=None):
+    """The entry's `revisit:` date once it has come, else None.
+
+    `revisit:` dates a temporary decision or an accepted risk ("no backup, for
+    now") -- a claim true today that someone has promised to re-decide. It is
+    due from that date until the claim is re-verified on or after it, so
+    bumping `verified:` clears it exactly as it clears drift triage. Callers
+    skip retired entries: their revisit no longer means anything.
+    """
+    try:
+        due = datetime.date.fromisoformat(str(e.get("revisit") or ""))
+    except ValueError:
+        return None
+    if due > (today or datetime.date.today()):
+        return None
+    try:
+        if datetime.date.fromisoformat(str(e.get("verified") or "")) >= due:
+            return None
+    except ValueError:
+        pass
+    return due
 
 
 # --- the two stores: team (committed) + personal (private) --------------------
@@ -173,6 +211,36 @@ def rel_path(project, path):
         return path.as_posix()
 
 
+def git_dirs(project):
+    """`(git_dir, common_dir)` of the checkout at `project`, or (None, None).
+
+    The recall log and the edit-time dedupe state live inside `.git`, where
+    they can never be committed. In a linked worktree (`git worktree add`, how
+    parallel agents usually run) and in a submodule, `.git` is a FILE --
+    `gitdir: <path>` -- naming the checkout's private dir, whose `commondir`
+    points at the repository's shared `.git`. Read from disk rather than via
+    `git rev-parse`: this runs in hooks, on every prompt and every edit.
+    """
+    dot = Path(project) / ".git"
+    if dot.is_dir():
+        return dot, dot
+    try:
+        pointer = dot.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None, None
+    if not pointer.startswith("gitdir:"):
+        return None, None
+    git_dir = Path(project) / pointer[len("gitdir:"):].strip()
+    if not git_dir.is_dir():
+        return None, None
+    try:
+        common = git_dir / (git_dir / "commondir").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        return git_dir, git_dir
+    return git_dir, (common if common.is_dir() else git_dir)
+
+
 # --- text tokenizing (shared by recall and the dupe finder) ------------------
 # Unicode-aware and diacritic-folding on purpose: `[a-z0-9_]+` split accented
 # words ("autenticación" -> "autenticaci" + "n"), which quietly broke recall for
@@ -201,8 +269,30 @@ def _unquote(s):
     return s
 
 
+def _strip_comment(s):
+    """`s` without a trailing YAML comment: a `#` that opens the value or
+    follows whitespace, outside quotes -- so `C#` and `"see #12"` keep theirs."""
+    if "#" not in s:  # the common case; this runs per line on every prompt
+        return s
+    quote = None
+    for i, c in enumerate(s):
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "\"'" and (i == 0 or s[i - 1] in " \t[,"):
+            quote = c
+        elif c == "#" and (i == 0 or s[i - 1] in " \t"):
+            return s[:i].rstrip()
+    return s
+
+
 def parse_frontmatter(text):
-    """Parse the leading `--- ... ---` YAML-ish block (simple subset). Returns dict."""
+    """Parse the leading `--- ... ---` YAML-ish block (simple subset). Returns dict.
+
+    Trailing `# comments` are dropped as YAML does -- the documented entry
+    format carries them, and a comment kept in the value turned
+    `status: superseded  # ...` into an unknown, i.e. LIVE, status.
+    """
     m = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.S)
     if not m:
         return {}
@@ -213,14 +303,14 @@ def parse_frontmatter(text):
         if not km:
             i += 1
             continue
-        key, rest = km.group(1), km.group(2).strip()
+        key, rest = km.group(1), _strip_comment(km.group(2).strip())
         if rest == "":
             # block list: subsequent `  - item` lines
             vals, j = [], i + 1
             while j < len(lines):
                 lm = re.match(r"^\s*-\s*(.+)$", lines[j])
                 if lm:
-                    vals.append(_unquote(lm.group(1)))
+                    vals.append(_unquote(_strip_comment(lm.group(1))))
                     j += 1
                 else:
                     break
@@ -295,6 +385,7 @@ def iter_entries(store, personal=False):
             "status": str(fm.get("status") or "current").lower(),
             "date": str(fm.get("date") or ""),
             "verified": str(fm.get("verified") or ""),
+            "revisit": str(fm.get("revisit") or ""),
             "category": str(fm.get("category") or p.parent.name),
             "personal": personal,
             # Set by /lore:consolidate: the consolidated skill that now carries
@@ -430,6 +521,7 @@ def iter_consolidated(project, cfg):
             "status": str(fm.get("status") or "current").lower(),
             "date": str(fm.get("date") or ""),
             "verified": str(fm.get("verified") or ""),
+            "revisit": str(fm.get("revisit") or ""),
             "category": str(fm.get("category") or "consolidated"),
             "personal": False,
             "consolidated_into": "",

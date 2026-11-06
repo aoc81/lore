@@ -8,7 +8,8 @@ if str(SCRIPTS) not in sys.path:
 
 
 def write_entry(store, relpath, title="", tags=(), files=(), status="current",
-                date="", verified="", body="Body.", consolidated_into=""):
+                date="", verified="", revisit="", body="Body.",
+                consolidated_into=""):
     """Write a minimal learning file under `store` and return its Path."""
     p = Path(store) / relpath
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -20,6 +21,8 @@ def write_entry(store, relpath, title="", tags=(), files=(), status="current",
     fm.append(f"status: {status}")
     if verified:
         fm.append(f"verified: {verified}")
+    if revisit:
+        fm.append(f"revisit: {revisit}")
     if consolidated_into:
         fm.append(f"consolidated_into: {consolidated_into}")
     fm.append("---")

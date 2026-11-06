@@ -3,13 +3,15 @@
 
 Modes:
   (default)   Existence check -- flag entries whose frontmatter `files:` paths no
-              longer exist. `--strict` exits 1 on ACTIONABLE issues (a missing
-              file on a non-stale entry; missing files on superseded entries are
-              expected/informational). Also reports `.lore.json` keys the hooks
-              silently ignore (a typo like `maxRecal`), which is invisible at
-              hook time by design, and the two ways the consolidated layer rots:
-              an entry whose `consolidated_into:` names a skill that does not
-              exist, and a skill citing a learning that has been deleted.
+              longer exist, and live entries whose `status:`/`date:`/`verified:`
+              the hooks would misread. `--strict` exits 1 on ACTIONABLE issues (a
+              missing file or a bad value on a non-stale entry; missing files on
+              superseded entries are expected/informational). Also reports
+              `.lore.json` keys the hooks silently ignore (a typo like
+              `maxRecal`), which is invisible at hook time by design, and the two
+              ways the consolidated layer rots: an entry whose
+              `consolidated_into:` names a skill that does not exist, and a
+              skill citing a learning that has been deleted.
   --report    Drift triage -- for each current entry, use `git log` to find
               referenced files changed AFTER the entry's `verified:` (or `date:`)
               baseline, ranked by gap. Best candidates for a re-verify. Heuristic.
@@ -44,10 +46,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (DEFAULTS, body_words, config_issues,  # noqa: E402
-                     find_project_dir, iter_consolidated, iter_entries,
-                     load_config, norm_rel, personal_store, ref_exists,
-                     ref_matches, rel_path, resolve_consolidated, skill_body,
-                     stale_after_days, words)
+                     find_project_dir, git_dirs, iter_consolidated,
+                     iter_entries, load_config, norm_rel, personal_store,
+                     ref_exists, ref_matches, rel_path, resolve_consolidated,
+                     revisit_due, skill_body, stale_after_days, words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -125,6 +127,68 @@ def config_warning(project):
     for k in invalid:
         bits.append(f"'{k}' has an invalid value (default kept)")
     return "note: .lore.json -- ignored: " + "; ".join(bits) + "."
+
+
+def personal_store_warning(project, cfg):
+    """Warn when git would publish the PRIVATE store, or None.
+
+    A `personalStoreDir` inside the repository (`.lore/personal`) is private
+    only while .gitignore covers it, and /lore:init adds that rule only when
+    it creates the directory: a hand-set key, or a rule removed later, leaves
+    someone's working preferences one `git add -A` away from a PR. Nothing
+    else would say so -- the personal store is never secret-scanned or
+    linted, because it is supposed to never be pushed.
+    """
+    store = personal_store(project, cfg)
+    if store is None or not store.is_dir():
+        return None
+    rel = rel_path(project, store)
+    if Path(rel).is_absolute():
+        return None  # outside the repository: git never sees it
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(project), "ls-files", "--", rel],
+            capture_output=True, text=True, timeout=15)
+        ignored = subprocess.run(
+            ["git", "-C", str(project), "check-ignore", "-q", rel],
+            capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if tracked.returncode != 0 or ignored.returncode not in (0, 1):
+        return None  # not a git repository, or git failed: nothing to say
+    if tracked.stdout.strip():
+        return (f"warning: personalStoreDir '{rel}' has files committed to "
+                f"git -- they are published. `git rm -r --cached {rel}`, then "
+                f"add '{rel}/' to .gitignore.")
+    if ignored.returncode == 1:
+        return (f"warning: personalStoreDir '{rel}' is inside the repository "
+                f"and not gitignored -- `git add -A` would publish it. Add "
+                f"'{rel}/' to .gitignore.")
+    return None
+
+
+# --- default mode: file-ref existence + frontmatter value check --------------
+
+def _value_problems(e, cfg):
+    """Frontmatter values the hooks silently misread, as messages.
+
+    A `status:` that is neither `current` nor a stale status is served by
+    recall as LIVE guidance -- a typo'd `superseeded` resurrects a retired
+    entry. A `date:`/`verified:`/`revisit:` that is not YYYY-MM-DD switches
+    off the entry's freshness signals (age flag, drift triage, the revisit
+    reminder) without a word.
+    """
+    problems = []
+    known = ["current"] + list(cfg["staleStatuses"])
+    if e["status"] not in known:
+        problems.append(f"unknown status '{e['status']}' -- recall reads it as "
+                        f"current; use one of: {', '.join(known)}")
+    for key in ("date", "verified", "revisit"):
+        value = e[key]
+        if value and not (_DATE_LINE.match(value) and _parse_date(value)):
+            problems.append(f"{key} '{value}' is not a YYYY-MM-DD date -- "
+                            "freshness checks skip it")
+    return problems
 
 
 # --- the consolidated layer --------------------------------------------------
@@ -243,17 +307,24 @@ def _print_consolidation_issues(project, cfg, dangling, missing_links, oversize)
 def cmd_check(entries, project, cfg, strict, consolidated=()):
     stale_set = set(cfg["staleStatuses"])
     consolidated = list(consolidated)
-    issues = []
-    # Skills are ref-checked on the same terms as entries: a `files:` list that
-    # has rotted is exactly as misleading there, and worse -- a skill's refs are
+    issues, bad_values, missing_refs = [], False, False
+    # Skills are checked on the same terms as entries: a `files:` list that has
+    # rotted is exactly as misleading there, and worse -- a skill's refs are
     # what drive edit-time recall for a whole topic.
     for e in entries + consolidated:
         actionable = e["status"] not in stale_set
+        if actionable:  # retired entries drive no guidance and no freshness
+            for problem in _value_problems(e, cfg):
+                issues.append((e, problem, True))
+                bad_values = True
         for ref in e["files"]:
             if ref and not ref_exists(project, ref):
-                issues.append((e, ref, actionable))
+                issues.append((e, f"referenced file no longer exists: {ref}",
+                               actionable))
+                missing_refs = True
     cons_issues = consolidation_issues(project, cfg, entries, consolidated)
-    notes = [n for n in (config_warning(project), version_warning(project)) if n]
+    notes = [n for n in (config_warning(project), version_warning(project),
+                         personal_store_warning(project, cfg)) if n]
     if not issues and not any(cons_issues):
         if entries or consolidated:
             # Name what was examined: with a consolidated layer, "all entries
@@ -274,19 +345,23 @@ def cmd_check(entries, project, cfg, strict, consolidated=()):
         return 0
     actionable = [i for i in issues if i[2]]
     if issues:
-        print(f"\nlearnings file-ref check: {len(issues)} issue(s), "
+        print(f"\nlearnings check: {len(issues)} issue(s), "
               f"{len(actionable)} actionable:")
         cur = None
-        for e, ref, act in issues:
+        for e, problem, act in issues:
             rel = e["path"].relative_to(project).as_posix()
             if rel != cur:
                 kind = " [consolidated skill]" if e.get("consolidated") else ""
                 print(f"\n  {rel} [status: {e['status'] or 'current'}]{kind}")
                 cur = rel
             note = "" if act else f"  (expected -- entry is {e['status']})"
-            print(f"    - referenced file no longer exists: {ref}{note}")
-        print("\n  -> A 'current' entry with a missing file is likely STALE: fix the path,")
-        print("     mark status: superseded, or re-verify the claim against the code.")
+            print(f"    - {problem}{note}")
+        if missing_refs:
+            print("\n  -> A 'current' entry with a missing file is likely STALE: fix the path,")
+            print("     mark status: superseded, or re-verify the claim against the code.")
+        if bad_values:
+            print("\n  -> Fix the value: a typo'd status is served as live guidance, and a")
+            print("     malformed date silently turns off the entry's freshness checks.")
     cons_actionable = _print_consolidation_issues(project, cfg, *cons_issues)
     for n in notes:
         print(f"  {n}")
@@ -402,6 +477,33 @@ def _drift_candidates(entries, project, stale_set):
 
 
 def cmd_report(entries, project, cfg):
+    """The re-verify worklist /lore:sweep reads: drift, then due revisits."""
+    _drift_report(entries, project, cfg)
+    _revisit_report(entries, project, cfg)
+    return 0
+
+
+def _revisit_report(entries, project, cfg):
+    """Live entries whose `revisit:` date has come -- temporary decisions.
+
+    Silent when none are due: most stores never use `revisit:`.
+    """
+    stale_set = set(cfg["staleStatuses"])
+    due = []
+    for e in entries:
+        d = revisit_due(e) if e["status"] not in stale_set else None
+        if d:
+            due.append((d, e["path"].relative_to(project).as_posix()))
+    if not due:
+        return
+    print("\nRevisit due -- temporary decisions whose re-check date has come:")
+    for d, rel in sorted(due):
+        print(f"  {d}  {rel}")
+    print("\n  -> Re-check the claim. Still true: bump 'verified:' (and set a new")
+    print("     'revisit:' if it is still temporary). No longer true: supersede it.")
+
+
+def _drift_report(entries, project, cfg):
     if not (project / ".git").exists():
         print("Drift triage: skipped (not a git repository).")
         return 0
@@ -516,11 +618,13 @@ def _recall_activity(entries, project):
     The `read` events come from the PostToolUse hook, so an install that
     predates it (or a target with no Read tool, e.g. Codex) has none -- and then
     "never read" would be vacuously true for every entry, which is why `unread`
-    is None rather than a full list. The log is local, inside `.git`, never
-    committed. Absent log -> None (no git, or nothing has surfaced yet).
+    is None rather than a full list. The log is local, inside `.git` (the
+    shared one, from a linked worktree), never committed. Absent log -> None
+    (no git, or nothing has surfaced yet).
     """
-    log = project / ".git" / "lore-recall.log"
-    if not log.is_file():
+    _git_dir, common = git_dirs(project)
+    log = common / "lore-recall.log" if common else None
+    if log is None or not log.is_file():
         return None
     surfaced, reads = {}, {}
     try:
@@ -602,7 +706,7 @@ def cmd_stats(entries, project, cfg, store, consolidated=()):
     stale_set = set(cfg["staleStatuses"])
     stale_days = stale_after_days(cfg)
     by_status, by_cat = {}, {}
-    deleted_refs = unverified_old = 0
+    deleted_refs = unverified_old = revisits = 0
     oldest = None
     for e in entries:
         st = e["status"] or "current"
@@ -611,6 +715,8 @@ def cmd_stats(entries, project, cfg, store, consolidated=()):
         if e["status"] not in stale_set and any(
                 f and not ref_exists(project, f) for f in e["files"]):
             deleted_refs += 1
+        if e["status"] not in stale_set and revisit_due(e):
+            revisits += 1
         age = _age_days(e["verified"] or e["date"])
         if age is not None:
             if age >= stale_days:
@@ -641,6 +747,8 @@ def cmd_stats(entries, project, cfg, store, consolidated=()):
     else:
         tail = "   -> verify_refs.py --report" if drift else ""
         print(f"    drift backlog (code changed since verified): {drift}{tail}")
+    tail = "   -> verify_refs.py --report" if revisits else ""
+    print(f"    revisit due (temporary decisions): {revisits}{tail}")
     print(f"    not verified in >{months}mo: {unverified_old}")
     if oldest:
         rel = oldest[1]["path"].relative_to(project).as_posix()
@@ -675,7 +783,8 @@ def cmd_stats(entries, project, cfg, store, consolidated=()):
     tail = "   -> verify_refs.py --dupes" if dupes else ""
     print(f"  near-duplicate pairs (title/tag overlap): {dupes}{tail}")
     print(f"  links: dangling [[refs]] (soft; forward-refs ok): {len(dangling)}")
-    for n in (config_warning(project), version_warning(project)):
+    for n in (config_warning(project), version_warning(project),
+              personal_store_warning(project, cfg)):
         if n:
             print(f"\n  {n}")
     return 0

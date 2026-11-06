@@ -38,7 +38,8 @@ jobs:
         run: python .lore/scan_secrets.py
 
       # Freshness. --strict fails when a `current` entry points at a file that
-      # no longer exists, which is the cheapest possible staleness signal.
-      # Drop --strict to make this advisory instead of blocking.
+      # no longer exists, which is the cheapest possible staleness signal, or
+      # has a status/date the hooks would misread (a typo'd status is served
+      # as live guidance). Drop --strict to make this advisory, not blocking.
       - name: Freshness check
         run: python .lore/verify_refs.py --strict

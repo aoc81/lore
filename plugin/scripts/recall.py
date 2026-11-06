@@ -72,9 +72,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (consolidated_paths, find_project_dir, fold,  # noqa: E402
-                     is_under, iter_consolidated, iter_store_entries,
-                     load_config, norm_rel, ref_exists, ref_matches, rel_path,
-                     resolve_consolidated, store_dirs, words)
+                     git_dirs, is_under, iter_consolidated,
+                     iter_store_entries, load_config, norm_rel, ref_exists,
+                     ref_matches, rel_path, resolve_consolidated, revisit_due,
+                     store_dirs, words)
 
 # Generic words that would over-match. Domain words are intentionally absent.
 # Entries are diacritic-folded (see _common.fold), so accented fillers are
@@ -137,6 +138,8 @@ def freshness_flags(e, project, cfg):
       stale signal (the claim's anchor is gone) -> flag it.
     - An entry not verified in >= `staleAfterMonths` shows its age, so it is
       not trusted blindly. `date:` is the stamp when `verified:` is absent.
+    - A live entry whose `revisit:` date has come (a decision taken "for
+      now") is flagged: it was true when written and may no longer be.
 
     Both thresholds come from `cfg`, so a project that redefines
     `staleStatuses` or `staleAfterMonths` gets the same answer everywhere.
@@ -148,6 +151,10 @@ def freshness_flags(e, project, cfg):
     checkable = not e.get("personal") or is_under(project, e["path"])
     if checkable and _refs_a_deleted_file(e, project, cfg):
         flags.append("! refs a deleted file")
+    due = (revisit_due(e) if e["status"] not in set(cfg["staleStatuses"])
+           else None)
+    if due:
+        flags.append(f"! revisit due since {due.isoformat()}")
     stamp = e["verified"] or e["date"]
     months = _months_since(stamp) if stamp else None
     if months is not None and months >= cfg["staleAfterMonths"]:
@@ -358,14 +365,15 @@ def log_recall(project, kind, paths):
     actually opened the file) -- `/lore:stats` compares the two, because an
     entry that surfaces constantly and is never read is noise, not knowledge.
 
-    Best-effort and silent: telemetry must never break the hook. Skipped when
-    `.git` is not a directory (bare repos, worktrees, no git).
+    Best-effort and silent: telemetry must never break the hook. Skipped
+    outside a git checkout. A linked worktree logs to the repository's shared
+    `.git`, so every worktree feeds the same `/lore:stats` numbers.
     """
     try:
-        git_dir = Path(project) / ".git"
-        if not git_dir.is_dir():
+        _git_dir, common = git_dirs(project)
+        if common is None:
             return
-        log = git_dir / "lore-recall.log"
+        log = common / "lore-recall.log"
         today = datetime.date.today().isoformat()
         lines = [f"{today}\t{kind}\t{rel_path(project, p)}\n" for p in paths]
         if log.exists() and log.stat().st_size > _LOG_MAX_BYTES:
@@ -386,8 +394,10 @@ _SEEN_MAX = 400
 
 
 def _seen_file(project):
-    git_dir = Path(project) / ".git"
-    return git_dir / "lore-recall-seen.json" if git_dir.is_dir() else None
+    # The checkout's own git dir (private per worktree), so parallel agents in
+    # separate worktrees never reset each other's dedupe state.
+    git_dir, _common = git_dirs(project)
+    return git_dir / "lore-recall-seen.json" if git_dir else None
 
 
 def unseen_matches(project, session_id, matches):
@@ -491,6 +501,9 @@ def run_query(text):
         print(_format_entry(e, stale, project, cfg))
     print("\n-> If one is the SAME problem/area, UPDATE it instead of creating a")
     print("   near-duplicate. Only add a new file if none truly overlaps.")
+    print("-> If what you learned contradicts one (the code or the decision")
+    print("   changed), set that entry to status: superseded with a banner")
+    print("   pointing to the new authority -- never leave both live.")
 
 
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch")

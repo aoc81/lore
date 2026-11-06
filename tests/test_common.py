@@ -3,13 +3,16 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
+from unittest import mock
 
 import _util  # noqa: F401  (puts plugin/scripts on sys.path)
-from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues, fold,
-                     is_under, iter_entries, iter_store_entries, load_config,
-                     norm_rel, parse_frontmatter, personal_store,
-                     read_frontmatter, ref_exists, ref_matches, rel_path,
+from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues,
+                     find_project_dir, fold, git_dirs, is_under, iter_entries,
+                     iter_store_entries, load_config, norm_rel,
+                     parse_frontmatter, personal_store, read_frontmatter,
+                     ref_exists, ref_matches, rel_path, revisit_due,
                      stale_after_days, store_dirs, words)
 from _util import write_entry
 
@@ -29,6 +32,45 @@ class TestParseFrontmatter(unittest.TestCase):
     def test_empty_list_and_missing_block(self):
         self.assertEqual(parse_frontmatter("---\ntags: []\n---\n")["tags"], [])
         self.assertEqual(parse_frontmatter("no frontmatter here"), {})
+
+    def test_trailing_comments_are_dropped(self):
+        # They used to become part of the value: `superseded  # replaced`
+        # was not a stale status, so recall served a dead entry as live.
+        fm = parse_frontmatter(
+            "---\n"
+            "status: superseded   # replaced by the v2 cursor\n"
+            "verified: 2026-01-01     # bump after a re-verify\n"
+            "files: [src/a.py]   # exact path or glob (src/*.py)\n"
+            "tags:   # none yet\n"
+            "---\n")
+        self.assertEqual(fm["status"], "superseded")
+        self.assertEqual(fm["verified"], "2026-01-01")
+        self.assertEqual(fm["files"], ["src/a.py"])
+        self.assertEqual(fm["tags"], [])
+
+    def test_hash_inside_a_value_is_kept(self):
+        fm = parse_frontmatter(
+            "---\n"
+            'title: "Why #1 wins"  # note\n'
+            "category: C#\n"
+            'tags: [a, "b # c"]\n'
+            "files:\n  - src/x.py  # the entry point\n"
+            "---\n")
+        self.assertEqual(fm["title"], "Why #1 wins")
+        self.assertEqual(fm["category"], "C#")
+        self.assertEqual(fm["tags"], ["a", "b # c"])
+        self.assertEqual(fm["files"], ["src/x.py"])
+
+    def test_documented_example_parses_as_documented(self):
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+            encoding="utf-8")
+        example = readme.split("```markdown\n", 1)[1].split("```", 1)[0]
+        fm = parse_frontmatter(example)
+        self.assertEqual(fm["track"], "knowledge")
+        self.assertEqual(fm["files"], [".github/workflows/ci.yml"])
+        self.assertEqual(fm["status"], "current")
+        self.assertEqual(fm["verified"], "2026-01-01")
+        self.assertEqual(fm["revisit"], "2026-06-01")
 
 
 class TestLoadConfig(unittest.TestCase):
@@ -115,6 +157,95 @@ class TestConfigIssues(unittest.TestCase):
             self.assertEqual(config_issues(td), ([], []))
 
 
+class TestFindProjectDir(unittest.TestCase):
+    """Hook `cwd` follows the agent's `cd`, so the store must be searched for."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.root = Path(td.name) / "repo"
+        self.deep = self.root / "src" / "deep"
+        self.deep.mkdir(parents=True)
+
+    def test_store_found_from_a_subdirectory(self):
+        (self.root / ".git").mkdir()
+        (self.root / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.root)
+
+    def test_lore_json_marks_the_root(self):
+        # A custom storeDir is only known from .lore.json, so it is a marker too.
+        (self.root / ".git").mkdir()
+        (self.root / ".lore.json").write_text('{"storeDir": "kb"}',
+                                             encoding="utf-8")
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.root)
+
+    def test_search_stops_at_the_repository_root(self):
+        # A store ABOVE the repo belongs to something else (e.g. ~/learnings).
+        (self.root / ".git").mkdir()
+        (self.root.parent / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.deep)
+
+    def test_outside_a_repository_only_the_start_is_checked(self):
+        (self.root / "learnings").mkdir()
+        self.assertEqual(find_project_dir({"cwd": str(self.deep)}), self.deep)
+        self.assertEqual(find_project_dir({"cwd": str(self.root)}), self.root)
+
+    def test_env_start_is_searched_too(self):
+        (self.root / ".git").mkdir()
+        (self.root / "learnings").mkdir()
+        with mock.patch.dict(os.environ,
+                             {"CLAUDE_PROJECT_DIR": str(self.deep)}):
+            self.assertEqual(find_project_dir(), self.root)
+
+
+class TestGitDirs(unittest.TestCase):
+    """Where the local-only state lives: `.git` may be a directory or a file."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.base = Path(td.name)
+
+    def test_plain_checkout(self):
+        (self.base / ".git").mkdir()
+        self.assertEqual(git_dirs(self.base), (self.base / ".git",) * 2)
+
+    def test_no_repository(self):
+        self.assertEqual(git_dirs(self.base), (None, None))
+
+    def test_linked_worktree(self):
+        # `git worktree add`: `.git` is a file naming a private dir, whose
+        # `commondir` points back at the repository's shared `.git`.
+        private = self.base / "main" / ".git" / "worktrees" / "wt"
+        private.mkdir(parents=True)
+        (private / "commondir").write_text("../..\n", encoding="utf-8")
+        wt = self.base / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text(f"gitdir: {private}\n", encoding="utf-8")
+        git_dir, common = git_dirs(wt)
+        self.assertEqual(git_dir, private)
+        self.assertEqual(common.resolve(),
+                         (self.base / "main" / ".git").resolve())
+
+    def test_relative_gitdir_without_commondir(self):
+        # A submodule: a relative `gitdir:` and no `commondir`.
+        private = self.base / ".git" / "modules" / "sub"
+        private.mkdir(parents=True)
+        sub = self.base / "sub"
+        sub.mkdir()
+        (sub / ".git").write_text("gitdir: ../.git/modules/sub\n",
+                                  encoding="utf-8")
+        git_dir, common = git_dirs(sub)
+        self.assertEqual(git_dir.resolve(), private.resolve())
+        self.assertEqual(common, git_dir)
+
+    def test_bad_pointer_is_no_repository(self):
+        (self.base / ".git").write_text("garbage", encoding="utf-8")
+        self.assertEqual(git_dirs(self.base), (None, None))
+        (self.base / ".git").write_text("gitdir: missing", encoding="utf-8")
+        self.assertEqual(git_dirs(self.base), (None, None))
+
+
 class TestTokenizing(unittest.TestCase):
     def test_accented_words_stay_whole_and_fold(self):
         self.assertEqual(words("autenticación"), ["autenticacion"])
@@ -143,6 +274,43 @@ class TestIterEntries(unittest.TestCase):
         by_name = {e["path"].name: e for e in entries}
         self.assertEqual(by_name["pager.md"]["title"], "pager")
         self.assertEqual(by_name["cache.md"]["category"], "ci")
+
+    def test_revisit_is_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            write_entry(td, "infra/no-backup.md", revisit="2026-12-01")
+            write_entry(td, "infra/other.md")
+            got = {e["path"].name: e["revisit"] for e in iter_entries(td)}
+        self.assertEqual(got, {"no-backup.md": "2026-12-01", "other.md": ""})
+
+
+class TestRevisitDue(unittest.TestCase):
+    """`revisit:` -- when a temporary decision ("for now") must be re-checked."""
+
+    TODAY = date(2026, 12, 15)
+
+    def due(self, revisit="", verified=""):
+        return revisit_due({"revisit": revisit, "verified": verified},
+                           self.TODAY)
+
+    def test_unset_or_future_is_not_due(self):
+        self.assertIsNone(self.due())
+        self.assertIsNone(self.due("2027-01-01"))
+
+    def test_date_that_has_come_is_due(self):
+        self.assertEqual(self.due("2026-12-01"), date(2026, 12, 1))
+        self.assertEqual(self.due("2026-12-15"), date(2026, 12, 15))
+
+    def test_reverified_on_or_after_it_is_not_due(self):
+        # Bumping `verified:` after a re-check clears it, as for drift triage.
+        self.assertIsNone(self.due("2026-12-01", verified="2026-12-01"))
+        self.assertIsNone(self.due("2026-12-01", verified="2026-12-10"))
+        self.assertEqual(self.due("2026-12-01", verified="2026-11-30"),
+                         date(2026, 12, 1))
+
+    def test_malformed_dates_are_ignored(self):
+        self.assertIsNone(self.due("soon"))
+        self.assertEqual(self.due("2026-12-01", verified="junk"),
+                         date(2026, 12, 1))
 
 
 class TestReadFrontmatter(unittest.TestCase):

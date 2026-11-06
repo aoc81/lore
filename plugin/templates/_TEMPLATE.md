@@ -7,6 +7,7 @@ tags: []
 files: []
 status: current
 # verified: ""        # set to a date (YYYY-MM-DD) when you confirm the claim against current code
+# revisit: ""         # a decision taken "for now": the date (YYYY-MM-DD) it must be re-decided
 ---
 
 <!-- KNOWLEDGE track uses the four sections below.

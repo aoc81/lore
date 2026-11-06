@@ -20,6 +20,8 @@ After running, call out anything worth acting on and suggest the next step:
   list; fix the path or mark the entry `superseded`.
 - a large **drift backlog** → `/lore:lint --report` to triage, then `/lore:sweep`
   to semantically re-verify the top entries.
+- **revisit due** > 0 → decisions taken "for now" whose `revisit:` date has come;
+  `/lore:lint --report` lists them and `/lore:sweep` re-checks them.
 - entries **not verified in >6mo** → candidates for a re-check + a fresh
   `verified:` stamp.
 - **never surfaced** > 0 in recall activity → those entries' tags don't match how
