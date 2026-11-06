@@ -573,6 +573,25 @@ class TestPersonalStorePublication(unittest.TestCase):
         self._git(proj, "commit", "-q", "-m", "oops")
         self.assertIn("committed", self._warn(proj) or "")
 
+    def test_committed_store_offers_a_quoted_free_fix_command(self):
+        proj = self._project(gitignore="notes/\n")
+        self._git(proj, "add", "-f", "notes")
+        self._git(proj, "commit", "-q", "-m", "oops")
+        self.assertIn("git rm -r --cached -- notes", self._warn(proj) or "")
+
+    def test_a_crafted_store_name_is_never_put_in_a_command(self):
+        # `personalStoreDir` comes from .lore.json, i.e. from the repository,
+        # and this warning is written to be pasted into a terminal.
+        name = "notes; echo pwned #"
+        proj = self._project()
+        write_entry(proj / name, "prefs/a.md", title="Pref")
+        self._git(proj, "add", "-f", "--", name)
+        self._git(proj, "commit", "-q", "-m", "oops")
+        warning = self._warn(proj, personal=name) or ""
+        self.assertIn("committed", warning)
+        self.assertNotIn("git rm -r --cached -- notes; echo", warning)
+        self.assertIn("name needs quoting", warning)
+
     def test_store_outside_the_repository_is_not_checked(self):
         outside = tempfile.TemporaryDirectory()
         self.addCleanup(outside.cleanup)

@@ -13,7 +13,7 @@ from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues,
                      iter_store_entries, load_config, norm_rel,
                      parse_frontmatter, personal_store, read_frontmatter,
                      ref_exists, ref_matches, rel_path, revisit_due,
-                     stale_after_days, store_dirs, words)
+                     shell_safe, stale_after_days, store_dirs, words)
 from _util import write_entry
 
 
@@ -466,3 +466,27 @@ class TestRelPathAndIsUnder(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestShellSafe(unittest.TestCase):
+    """The allowlist behind every path printed inside a shell command.
+
+    Store filenames and `personalStoreDir` come from the repository, and
+    several messages end in a command the reader pastes into a terminal. See
+    _common.shell_safe.
+    """
+
+    def test_ordinary_paths_are_safe(self):
+        for p in ("learnings/ci/a.md", ".lore/personal", "docs/solutions",
+                  "a-b_c.2/x@y+z.md"):
+            with self.subTest(path=p):
+                self.assertTrue(shell_safe(p))
+
+    def test_metacharacters_and_whitespace_are_refused(self):
+        for p in ("a; echo pwned #.md", "a && b", "a|b", "a b.md", "a$(x)",
+                  "a`x`", "a'b", 'a"b', "a\nb", "a*b", "a>b"):
+            with self.subTest(path=p):
+                self.assertFalse(shell_safe(p))
+
+    def test_empty_is_refused(self):
+        self.assertFalse(shell_safe(""))

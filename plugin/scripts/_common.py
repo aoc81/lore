@@ -599,6 +599,28 @@ def ref_matches(ref, rel):
     return rel == ref
 
 
+# --- paths we are willing to print inside a shell command -------------------
+# Several messages end in a command the reader is meant to paste into a
+# terminal (`git rm -r --cached <path>`). The paths in them come from the
+# REPOSITORY -- a store filename, or `personalStoreDir` out of `.lore.json` --
+# so a crafted name turns that line into whatever its author wanted, and the
+# reader runs it. Cross-platform quoting is not worth attempting: `shlex` is
+# POSIX-only and these print on Windows too. So a path is either safe unquoted
+# in any shell, or it is named on its own and no command is offered for it.
+_SHELL_SAFE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
+
+
+def shell_safe(path):
+    """True when `path` can be pasted into a shell command unquoted.
+
+    Deliberately an allowlist: anything with whitespace, a quote, or a
+    metacharacter is refused rather than escaped. Callers print the path
+    without a command instead -- see consolidate.cmd_prune and
+    verify_refs.personal_store_warning.
+    """
+    return bool(_SHELL_SAFE.match(str(path)))
+
+
 def ref_exists(project, ref):
     """True when a `files:` ref (path, dir prefix, or glob) resolves to
     something that still exists under `project`."""

@@ -49,7 +49,8 @@ from _common import (DEFAULTS, body_words, config_issues,  # noqa: E402
                      find_project_dir, git_dirs, iter_consolidated,
                      iter_entries, load_config, norm_rel, personal_store,
                      ref_exists, ref_matches, rel_path, resolve_consolidated,
-                     revisit_due, skill_body, stale_after_days, words)
+                     revisit_due, shell_safe, skill_body, stale_after_days,
+                     words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -157,9 +158,16 @@ def personal_store_warning(project, cfg):
     if tracked.returncode != 0 or ignored.returncode not in (0, 1):
         return None  # not a git repository, or git failed: nothing to say
     if tracked.stdout.strip():
+        # `rel` comes from `.lore.json`, i.e. from the repository, and this
+        # line is written to be pasted into a terminal. Offer the command only
+        # for a name that is safe unquoted; otherwise say what to do without
+        # building a command around it. `--` guards a name starting with `-`.
+        fix = (f"`git rm -r --cached -- {rel}`" if shell_safe(rel)
+               else "untrack that directory with `git rm -r --cached` (its "
+                    "name needs quoting, so it is not spelled out here)")
         return (f"warning: personalStoreDir '{rel}' has files committed to "
-                f"git -- they are published. `git rm -r --cached {rel}`, then "
-                f"add '{rel}/' to .gitignore.")
+                f"git -- they are published. {fix}, then add '{rel}/' to "
+                ".gitignore.")
     if ignored.returncode == 1:
         return (f"warning: personalStoreDir '{rel}' is inside the repository "
                 f"and not gitignored -- `git add -A` would publish it. Add "
