@@ -286,6 +286,58 @@ def _strip_comment(s):
     return s
 
 
+# A YAML block scalar header: `key: >-`, `key: |`, and friends. The value is
+# the indented lines that follow. This is the form a long `description:` has to
+# use (an unquoted one cannot contain ": "), so a parser that stops at the
+# header reads every correctly-written long description as ">-".
+_BLOCK_HEAD = re.compile(r"^([|>])([+-]?)$")
+
+# What a plain (unquoted) YAML scalar may not contain -- two DIFFERENT failures,
+# verified against a strict parser:
+#   ": "  -> ScannerError: the whole document is invalid, so Claude Code throws
+#            the frontmatter away and falls back to the file's first heading.
+#   " #"  -> parses fine and the value is TRUNCATED at the comment
+#            ("backlog (epic #53) notes" -> "backlog (epic").
+# Both lose the trigger text; they look nothing alike when you go looking, so
+# the report has to say which one you have.
+_PLAIN_UNSAFE = {
+    ": ": "breaks",
+    " #": "truncates",
+}
+
+_UNSAFE_EFFECT = {
+    "breaks": (": ", "the whole frontmatter fails to parse; the host falls "
+                     "back to the first heading"),
+    "truncates": (" #", "the value is silently cut at the comment"),
+}
+
+
+def unsafe_effect(kind):
+    """`(needle, consequence)` for a `host_unsafe_keys` kind, for reporting."""
+    return _UNSAFE_EFFECT.get(kind, ("", "the value is not read as written"))
+
+
+def _block_scalar(lines, i, style):
+    """`(value, next_index)` for the block scalar whose header is at `lines[i]`.
+
+    Folded (`>`) joins the lines with spaces, literal (`|`) with newlines; a
+    `-` chomping indicator is handled by the caller stripping the result. Good
+    enough for a frontmatter description, which is what uses this -- it does
+    not implement indentation indicators or blank-line folding rules.
+    """
+    body, j = [], i + 1
+    while j < len(lines):
+        line = lines[j]
+        if line.strip() and not line[:1].isspace():
+            break  # a new key at column 0 ends the scalar
+        body.append(line.strip())
+        j += 1
+    while body and not body[-1]:
+        body.pop()
+    joined = ("\n" if style == "|" else " ").join(body)
+    return joined.strip(), j
+
+
 def parse_frontmatter(text):
     """Parse the leading `--- ... ---` YAML-ish block (simple subset). Returns dict.
 
@@ -316,6 +368,13 @@ def parse_frontmatter(text):
                     break
             fm[key] = vals
             i = j
+            continue
+        block = _BLOCK_HEAD.match(rest)
+        if block:
+            # `description: >-` and the indented lines under it. Without this
+            # the value reads as the literal ">-", which is what a long,
+            # correctly-written description would have given recall.
+            fm[key], i = _block_scalar(lines, i, block.group(1))
             continue
         if rest == "[]":
             fm[key] = []
@@ -568,6 +627,73 @@ def skill_body(path):
 def body_words(path):
     """Word count of a consolidated skill's body -- the /lore:consolidate budget."""
     return len(skill_body(path).split())
+
+
+def host_unsafe_keys(path):
+    """`[(key, kind)]` for plain scalars a strict YAML parser mishandles.
+
+    `kind` is "breaks" (an unquoted ": ", which invalidates the document) or
+    "truncates" (an unquoted " #", which parses but cuts the value at the
+    comment) -- see `_UNSAFE_EFFECT`. Returns None when there is no
+    frontmatter block at all, which is a different thing from no problems.
+
+    This matters for a consolidated skill because Claude Code reads `name` and
+    `description` from that block, and either failure costs the skill the one
+    line that decides when it loads. Lore's own parser is line-based and
+    lenient, so it reads those descriptions perfectly well and would otherwise
+    never notice the host had thrown them away.
+
+    Measured on one real consolidation: 43 of 47 skills -- 42 broken by ": "
+    and one truncated by " #" -- every one indexed happily by recall and none
+    carrying the description the host would show.
+
+    Quoting the value, or writing it as a `>-` block scalar, fixes both.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.S)
+    if not m:
+        return None
+    bad = []
+    for line in m.group(1).splitlines():
+        km = re.match(r"^([A-Za-z0-9_]+):[ \t]*(.*)$", line)
+        if not km:
+            continue
+        key, value = km.group(1), km.group(2).strip()
+        if not value or _BLOCK_HEAD.match(value):
+            continue  # a list, or a block scalar: both are safe
+        if value[0] in "\"'" or value.startswith("["):
+            continue  # quoted, or a flow sequence
+        for needle, kind in _PLAIN_UNSAFE.items():
+            if needle in value:
+                bad.append((key, kind))
+                break
+    return bad
+
+
+def skill_cites(skill, entry):
+    """True when a skill's BODY names `entry` -- its slug, filename, or path.
+
+    This is the evidence that a skill actually carries an entry's rule, and
+    recall will not hide the entry behind the skill without it. The frontmatter
+    stamp alone is not evidence: `consolidated_into:` says someone intended the
+    skill to cover the entry, while the citation says the rule is in there, next
+    to a link back to the full account.
+
+    Measured on a real pass before this existed: 411 entries were stamped into
+    skills whose bodies cited NONE of them, and recall hid all 411 behind
+    summaries as short as 32 words -- one of them truncated mid-sentence. Which
+    is why /lore:consolidate asks for the link, and why this reads the body
+    rather than trusting the stamp.
+    """
+    body = skill_body(skill["path"]) if isinstance(skill, dict) else str(skill)
+    body = body.casefold()  # both sides folded: a citation's case is the
+    p = Path(entry["path"]) if isinstance(entry, dict) else Path(entry)
+    # author's, not the filesystem's, on every platform.
+    return any(c and c.casefold() in body
+               for c in (p.stem, p.name, norm_rel(p.as_posix())))
 
 
 # --- file-reference matching -------------------------------------------------

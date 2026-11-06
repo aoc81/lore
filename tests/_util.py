@@ -31,8 +31,14 @@ def write_entry(store, relpath, title="", tags=(), files=(), status="current",
 
 
 def write_skill(project, name, description="", tags=(), files=(),
-                body="# Skill\n\nRules.", skills_dir=".claude/skills"):
-    """Write a consolidated skill at `<project>/<skills_dir>/<name>/SKILL.md`."""
+                body="# Skill\n\nRules.", skills_dir=".claude/skills",
+                cites=()):
+    """Write a consolidated skill at `<project>/<skills_dir>/<name>/SKILL.md`.
+
+    `cites` is the entry paths the body links to. Recall absorbs an entry into
+    a skill only when the skill's body names it, so a test about absorption has
+    to say which entries this skill actually carries.
+    """
     p = Path(project) / skills_dir / name / "SKILL.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     fm = ["---", f"name: {name}", f"description: {description}"]
@@ -41,5 +47,9 @@ def write_skill(project, name, description="", tags=(), files=(),
     if files:
         fm.append(f"files: [{', '.join(files)}]")
     fm.append("---")
-    p.write_text("\n".join(fm) + "\n\n" + body + "\n", encoding="utf-8")
+    text = body
+    if cites:
+        text += "\n\n## Source notes\n\n" + "\n".join(
+            f"- [{Path(c).stem}]({c})" for c in cites)
+    p.write_text("\n".join(fm) + "\n\n" + text + "\n", encoding="utf-8")
     return p

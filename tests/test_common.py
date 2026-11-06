@@ -12,8 +12,9 @@ from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues,
                      find_project_dir, fold, git_dirs, is_under, iter_entries,
                      iter_store_entries, load_config, norm_rel,
                      parse_frontmatter, personal_store, read_frontmatter,
-                     ref_exists, ref_matches, rel_path, revisit_due,
-                     shell_safe, stale_after_days, store_dirs, words)
+                     host_unsafe_keys, ref_exists, ref_matches, rel_path,
+                     revisit_due, shell_safe, stale_after_days, store_dirs,
+                     words)
 from _util import write_entry
 
 
@@ -490,3 +491,73 @@ class TestShellSafe(unittest.TestCase):
 
     def test_empty_is_refused(self):
         self.assertFalse(shell_safe(""))
+
+
+class TestBlockScalars(unittest.TestCase):
+    """`description: >-` is the form a long skill description HAS to use.
+
+    A parser that stops at the header reads every correctly-written long
+    description as ">-", which would make the recommended fix the thing that
+    breaks recall.
+    """
+
+    def fm(self, body):
+        return parse_frontmatter("---\n" + body + "---\n")
+
+    def test_folded_joins_with_spaces(self):
+        got = self.fm("description: >-\n  CI invariants: gate,\n  and ruff\n")
+        self.assertEqual(got["description"], "CI invariants: gate, and ruff")
+
+    def test_literal_keeps_newlines(self):
+        got = self.fm("body: |\n  one\n  two\n")
+        self.assertEqual(got["body"], "one\ntwo")
+
+    def test_a_following_key_ends_the_scalar(self):
+        got = self.fm("description: >-\n  long text\ntags: [a, b]\n")
+        self.assertEqual(got["description"], "long text")
+        self.assertEqual(got["tags"], ["a", "b"])
+
+    def test_quoted_and_plain_still_work(self):
+        self.assertEqual(
+            self.fm('description: "CI: gate"\n')["description"], "CI: gate")
+        self.assertEqual(
+            self.fm("description: CI: gate\n")["description"], "CI: gate")
+
+
+class TestHostUnsafeKeys(unittest.TestCase):
+    """Frontmatter lore reads happily and the host throws away entirely."""
+
+    def _write(self, body):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        p = Path(td.name) / "SKILL.md"
+        p.write_text("---\n" + body + "---\n\n# Heading\n", encoding="utf-8")
+        return p
+
+    def test_plain_scalar_with_colon_space_is_flagged(self):
+        p = self._write("name: lore-ci\ndescription: CI invariants: the gate\n")
+        self.assertEqual(host_unsafe_keys(p), [("description", "breaks")])
+        # lore itself reads it fine -- which is why it needs reporting
+        self.assertIn("the gate", read_frontmatter(p)["description"])
+
+    def test_plain_scalar_with_hash_truncates_rather_than_breaks(self):
+        # Verified against a strict parser: " #" PARSES, and cuts the value at
+        # the comment ("backlog (epic"). A different symptom from ": ", so the
+        # report has to distinguish them.
+        p = self._write("description: backlog (epic #53) notes\n")
+        self.assertEqual(host_unsafe_keys(p), [("description", "truncates")])
+
+    def test_quoted_block_and_list_values_are_safe(self):
+        for body in ('description: "CI: gate"\n',
+                     "description: >-\n  CI: gate\n",
+                     "tags: [a, b]\n",
+                     "description: plain and safe\n"):
+            with self.subTest(body=body):
+                self.assertEqual(host_unsafe_keys(self._write(body)), [])
+
+    def test_no_frontmatter_is_none_not_empty(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        p = Path(td.name) / "SKILL.md"
+        p.write_text("# Just a heading\n", encoding="utf-8")
+        self.assertIsNone(host_unsafe_keys(p))

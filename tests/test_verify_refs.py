@@ -502,6 +502,32 @@ class TestConsolidationChecks(unittest.TestCase):
         self.assertIn("[consolidated skill]", text)
         self.assertIn("gone/path.yml", text)
 
+    def test_frontmatter_the_host_cannot_parse_is_actionable(self):
+        # 42 of 47 skills in one real pass. The skill still works as a file and
+        # lore reads the description fine; the host throws the block away.
+        proj = self._project()
+        write_skill(proj, "lore-ci",
+                    description="CI invariants: the always-on gate",
+                    tags=("ci",))
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 1)
+        self.assertIn("Claude Code cannot parse", text)
+        self.assertIn("description", text)
+
+    def test_a_quoted_description_is_not_flagged(self):
+        proj = self._project()
+        write_skill(proj, "lore-ci", description='"CI invariants: the gate"',
+                    tags=("ci",))
+        rc, text = self._run(proj, "--strict")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("cannot parse", text)
+
+    def test_stats_counts_unloadable_skills(self):
+        proj = self._project()
+        write_skill(proj, "lore-ci", description="CI: the gate", tags=("ci",))
+        _rc, text = self._run(proj, "--stats")
+        self.assertIn("frontmatter the host cannot parse: 1", text)
+
     def test_oversize_skill_is_a_note_not_a_failure(self):
         proj = self._project()
         write_skill(proj, "lore-ci", description="CI", tags=("ci",),

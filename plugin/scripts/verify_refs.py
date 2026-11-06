@@ -46,11 +46,11 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (DEFAULTS, body_words, config_issues,  # noqa: E402
-                     find_project_dir, git_dirs, iter_consolidated,
-                     iter_entries, load_config, norm_rel, personal_store,
-                     ref_exists, ref_matches, rel_path, resolve_consolidated,
-                     revisit_due, shell_safe, skill_body, stale_after_days,
-                     words)
+                     find_project_dir, git_dirs, host_unsafe_keys,
+                     iter_consolidated, iter_entries, load_config, norm_rel,
+                     personal_store, ref_exists, ref_matches, rel_path,
+                     resolve_consolidated, revisit_due, shell_safe,
+                     skill_body, stale_after_days, unsafe_effect, words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -252,17 +252,22 @@ def _skill_entry_links(project, skill, store):
 
 
 def consolidation_issues(project, cfg, entries, consolidated):
-    """`(dangling_into, missing_links, oversize)` across the consolidated layer.
+    """`(dangling_into, missing_links, oversize, unloadable)` for the layer.
 
     dangling_into: entries whose `consolidated_into:` names no visible skill.
     missing_links: `(skill, [cited entry paths that are gone])`.
     oversize:      `(skill, words)` over `consolidatedMaxWords`.
+    unloadable:    `(skill, [keys])` whose plain scalars a YAML parser rejects,
+                   so Claude Code drops the frontmatter and the skill loses the
+                   `description` that decides when it loads. Lore's own parser
+                   is lenient and reads them fine, which is exactly why this
+                   needs saying out loud.
     """
     dangling = [e for e in entries
                 if e["consolidated_into"]
                 and resolve_consolidated(project, e, consolidated) is None]
     store = Path(project) / cfg["storeDir"]
-    missing_links, oversize = [], []
+    missing_links, oversize, unloadable = [], [], []
     for c in consolidated:
         gone = _skill_entry_links(project, c, store)
         if gone:
@@ -270,10 +275,14 @@ def consolidation_issues(project, cfg, entries, consolidated):
         n = body_words(c["path"])
         if n > cfg["consolidatedMaxWords"]:
             oversize.append((c, n))
-    return dangling, missing_links, oversize
+        keys = host_unsafe_keys(c["path"])
+        if keys:
+            unloadable.append((c, keys))
+    return dangling, missing_links, oversize, unloadable
 
 
-def _print_consolidation_issues(project, cfg, dangling, missing_links, oversize):
+def _print_consolidation_issues(project, cfg, dangling, missing_links, oversize,
+                                unloadable=()):
     """Report the three consolidation faults; returns True if any was actionable."""
     actionable = False
     if dangling:
@@ -300,6 +309,19 @@ def _print_consolidation_issues(project, cfg, dangling, missing_links, oversize)
                 print(f"    - cited learning no longer exists: {g}")
         print("\n  -> The rule lost its evidence. Restore the entry, or fold its root")
         print("     cause into the skill and drop the dead link.")
+    if unloadable:
+        actionable = True
+        print(f"\nconsolidation: {len(unloadable)} skill(s) have frontmatter "
+              "Claude Code cannot parse:")
+        for c, keys in unloadable:
+            print(f"  {rel_path(project, c['path'])}")
+            for key, kind in keys:
+                needle, effect = unsafe_effect(kind)
+                print(f"    - {key}: unquoted '{needle}' -- {effect}")
+        print("\n  -> Either way the skill keeps working as a file and loses the")
+        print("     description that decides when it loads. Quote the value, or write")
+        print("     it as a `>-` block scalar. (Lore's own parser is lenient and reads")
+        print("     these fine, which is why nothing else reports it.)")
     if oversize:
         limit = cfg["consolidatedMaxWords"]
         print(f"\nnote: {len(oversize)} consolidated skill(s) over the "
@@ -685,7 +707,7 @@ def _print_consolidation_stats(project, cfg, entries, consolidated):
     live = [e for e in entries if e["status"] not in stale_set]
     done = [e for e in live
             if resolve_consolidated(project, e, consolidated) is not None]
-    dangling, missing_links, oversize = consolidation_issues(
+    dangling, missing_links, oversize, unloadable = consolidation_issues(
         project, cfg, entries, consolidated)
     limit = cfg["consolidatedMaxWords"]
     where = ", ".join(cfg["consolidatedDirs"]) or "(consolidatedDirs unset)"
@@ -707,6 +729,9 @@ def _print_consolidation_stats(project, cfg, entries, consolidated):
     if missing_links:
         print(f"    ! skills citing a deleted learning: {len(missing_links)}"
               "   -> verify_refs.py (no args)")
+    if unloadable:
+        print(f"    ! frontmatter the host cannot parse: {len(unloadable)}"
+              "   -> the skill loses its description")
     print("")
 
 

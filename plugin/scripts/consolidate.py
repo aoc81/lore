@@ -41,12 +41,13 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (LOG_NAME, body_words, find_project_dir,  # noqa: E402
-                     iter_consolidated, iter_entries, load_config,
-                     personal_store, rel_path, resolve_consolidated,
-                     shell_safe, store_dirs)
-from recall import rank_matches  # noqa: E402
+                     host_unsafe_keys, iter_consolidated, iter_entries,
+                     load_config, norm_rel, personal_store, rel_path,
+                     resolve_consolidated, shell_safe, skill_cites,
+                     store_dirs)
+from recall import match_by_file, rank_matches  # noqa: E402
 
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 
 
 def _entries(project, cfg):
@@ -98,6 +99,16 @@ def cmd_plan(project, cfg, entries, consolidated, category=None):
                   "   -> invisible to edit-time recall")
             for c in no_refs[:5]:
                 print(f"      - {rel_path(project, c['path'])}")
+        unloadable = [(c, k) for c, k in
+                      ((c, host_unsafe_keys(c["path"])) for c in consolidated)
+                      if k]
+        if unloadable:
+            print(f"    ! frontmatter the host cannot parse: {len(unloadable)}")
+            for c, keys in unloadable[:5]:
+                shown = ", ".join(f"{k} ({kind})" for k, kind in keys)
+                print(f"      - {rel_path(project, c['path'])}  {shown}")
+            print("      The skill loses the trigger text that decides when it")
+            print("      loads. Quote the value or use a `>-` block scalar.")
 
     live = [e for e in entries if e["status"] not in stale_set]
     done, dangling, todo = [], [], []
@@ -160,28 +171,33 @@ def cmd_plan(project, cfg, entries, consolidated, category=None):
 
 # --- recall parity -----------------------------------------------------------
 
-def _queries(entries, extra_file=None):
-    """The parity query set: one query per entry, plus any from `extra_file`.
+def _queries(project, entries, extra_file=None):
+    """`{query: primary_entry_path_or_None}` -- the parity probes.
 
-    An entry's own title + tags is the sharpest possible probe for it -- it is
-    literally what the scorer matches on. If that query stops reaching the entry
-    (or the skill that absorbed it), consolidation broke recall for the one
+    An entry's own title + tags is the sharpest possible probe for it: it is
+    literally what the scorer matches on. That entry is the query's PRIMARY --
+    the one result the query exists to check. If a query stops reaching its
+    primary (or the skill that absorbed it), consolidation broke recall for the
     prompt most likely to need it.
+
+    Queries from `extra_file` have no primary: they are the project's own
+    golden questions, checked for an answer rather than for a specific entry.
     """
-    qs = []
+    qs = {}
     for e in entries:
         q = " ".join([e["title"]] + list(e["tags"])).strip()
-        if q:
-            qs.append(q)
+        if q and q not in qs:
+            qs[q] = rel_path(project, e["path"])
     if extra_file:
         try:
             for line in Path(extra_file).read_text(
                     encoding="utf-8").splitlines():
-                if line.strip() and not line.lstrip().startswith("#"):
-                    qs.append(line.strip())
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    qs.setdefault(line, None)
         except OSError as exc:
             print(f"warning: could not read {extra_file}: {exc}")
-    return list(dict.fromkeys(qs))
+    return qs
 
 
 def _answers(project, cfg, queries, stores, consolidated):
@@ -194,13 +210,16 @@ def _answers(project, cfg, queries, stores, consolidated):
 
 def cmd_snapshot(project, cfg, entries, consolidated, path, extra_file):
     stores = _live_stores(project, cfg)
-    queries = _queries(entries, extra_file)
-    answers = _answers(project, cfg, queries, stores, consolidated)
+    queries = _queries(project, entries, extra_file)
+    answers = _answers(project, cfg, list(queries), stores, consolidated)
     Path(path).write_text(json.dumps({
         "version": SNAPSHOT_VERSION,
         "taken": datetime.date.today().isoformat(),
         "maxRecall": cfg["maxRecall"],
         "queries": answers,
+        # The entry each query exists to find. Without it, --compare cannot
+        # tell a lost lesson from a result pushed out of the top maxRecall.
+        "primaries": {q: p for q, p in queries.items() if p},
     }, indent=1, sort_keys=True), encoding="utf-8")
     answered = sum(1 for v in answers.values() if v)
     print(f"Recall snapshot written to {path}")
@@ -209,19 +228,71 @@ def cmd_snapshot(project, cfg, entries, consolidated, path, extra_file):
     return 0
 
 
-def _excused(project, lost, after, entries_by_rel, consolidated):
-    """True when a path dropping out of a query's answers is EXPECTED.
+def _edit_parity(project, cfg, entries, stores, consolidated):
+    """`(checked, kept, lost)` for the EDIT surface, replayed per (entry, path).
 
-    Two legitimate reasons: the entry was absorbed and the skill that absorbed
-    it answers the query instead, or the entry is gone from disk entirely (a
-    pruned stale entry) and the query is still answered by something. Anything
-    else is a real loss of recall.
+    The prompt surface is only half of recall, and the half a retrieval
+    benchmark can see. This is the other half: for every path an entry names in
+    `files:`, is THAT entry still within `maxRecall` when the path is edited?
+
+    Asking instead whether *anything* fires is the vacuous version of the
+    question, and it passes while every entry has been displaced by a skill
+    carrying a union of refs. Measured that way, a real pass reported 482 of
+    483 paths still firing -- and 853 of 853 (entry, path) pairs had lost the
+    entry that knew about them.
     """
+    cap = cfg["maxRecall"]
+    checked, kept, lost = 0, 0, []
+    for e in entries:
+        me = rel_path(project, e["path"])
+        for ref in [f for f in e["files"] if f]:
+            probe = norm_rel(ref).rstrip("/")
+            if not probe or any(c in probe for c in "*?["):
+                continue  # a glob is not a path to probe with
+            before = [rel_path(project, x["path"]) for _s, x in
+                      match_by_file([probe], stores, cfg, (), project)][:cap]
+            if me not in before:
+                continue  # it did not surface for its own path to begin with
+            checked += 1
+            after = [rel_path(project, x["path"]) for _s, x in
+                     match_by_file([probe], stores, cfg, consolidated,
+                                   project)][:cap]
+            if me in after:
+                kept += 1
+                continue
+            # Absorption counts here on the same terms as on the prompt
+            # surface: a skill standing in for the entry is fine when it
+            # CITES the entry, and a loss when it merely matched the path.
+            target = resolve_consolidated(project, e, consolidated)
+            if (target is not None
+                    and rel_path(project, target["path"]) in after
+                    and skill_cites(target, e)):
+                kept += 1
+            else:
+                lost.append((me, probe, after))
+    return checked, kept, lost
+
+
+def _reachable(project, lost, after, entries_by_rel, consolidated):
+    """True when a path missing from a query's answers is still REACHABLE.
+
+    Three legitimate reasons: the entry is in the answers after all; the skill
+    that absorbed it answers the query instead; or the entry is gone from disk
+    entirely (a pruned stale entry) and the query is still answered by
+    something. Anything else is a real loss of recall.
+    """
+    if lost in after:
+        return True
     e = entries_by_rel.get(lost)
     if e is None:
         return bool(after)  # entry deleted; the topic is still reachable
     target = resolve_consolidated(project, e, consolidated)
-    return target is not None and rel_path(project, target["path"]) in after
+    if target is None or rel_path(project, target["path"]) not in after:
+        return False
+    # The skill answering is only a substitute if it CITES the entry. Counting
+    # the stamp alone as success is how a pass can report zero regressions
+    # while hiding every entry behind a summary that never mentions it.
+    return skill_cites(target, e)
 
 
 def cmd_compare(project, cfg, entries, consolidated, path):
@@ -238,25 +309,48 @@ def cmd_compare(project, cfg, entries, consolidated, path):
     after = _answers(project, cfg, list(before), stores, consolidated)
     by_rel = {rel_path(project, e["path"]): e for e in entries}
 
-    unchanged, absorbed, regressed = 0, 0, []
+    primaries = snap.get("primaries")
+    if not isinstance(primaries, dict):
+        primaries = {}
+
+    # Two different things drop out of a query's answers, and only one is a
+    # failure. The PRIMARY is the entry the query exists to find; losing it
+    # (and the skill that absorbed it) means a lesson became unreachable.
+    # Anything else that leaves the top `maxRecall` was incidental to that
+    # query and has its own query of its own -- adding a layer reshuffles the
+    # tail by design, and reporting that as a regression buries the real one.
+    # A v1 snapshot carries no primaries; every path is then treated as one,
+    # which is the old, noisier behaviour.
+    kept, absorbed, regressed, reshuffled = 0, 0, [], 0
     for q, was in before.items():
         now = after.get(q, [])
-        lost = [p for p in was if p not in now]
-        if not lost:
-            unchanged += 1
-            continue
-        bad = [p for p in lost
-               if not _excused(project, p, now, by_rel, consolidated)]
+        primary = primaries.get(q)
+        checked = [primary] if primary else list(was)
+        bad = [p for p in checked
+               if not _reachable(project, p, now, by_rel, consolidated)]
         if bad:
             regressed.append((q, bad, now))
-        else:
+            continue
+        if primary and primary not in now:
             absorbed += 1
+        elif [p for p in was if p not in now]:
+            reshuffled += 1
+            kept += 1
+        else:
+            kept += 1
 
+    # distinct names: `kept` already belongs to the prompt surface above, and
+    # reusing it silently overwrote the number this report prints for it.
+    e_checked, e_kept, e_lost = _edit_parity(project, cfg, entries, stores,
+                                             consolidated)
     print(f"Recall parity check -- {len(before)} queries replayed against the "
           "store as it is now")
-    print(f"  unchanged:                        {unchanged}")
-    print(f"  answered by a consolidated skill: {absorbed}")
+    print(f"  primary still found:              {kept}")
+    print(f"  primary now answered by its skill: {absorbed}")
     print(f"  REGRESSED (no longer reachable):  {len(regressed)}")
+    if reshuffled:
+        print(f"    (of those, {reshuffled} saw other results leave the top "
+              f"{cfg['maxRecall']} -- expected when a layer is added)")
     for q, bad, now in regressed[:20]:
         print("")
         print(f"    query: {q[:110]}")
@@ -265,15 +359,34 @@ def cmd_compare(project, cfg, entries, consolidated, path):
         print(f"      now:  {', '.join(now) or '(nothing)'}")
     if len(regressed) > 20:
         print(f"\n    ... and {len(regressed) - 20} more.")
+    print("")
+    print(f"  edit surface -- {e_checked} (entry, path) pairs where the entry "
+          f"surfaced for its own path:")
+    print(f"    still within maxRecall:           {e_kept}")
+    print(f"    displaced by a skill:             {len(e_lost)}")
+    for me, probe, after in e_lost[:8]:
+        print(f"      - {me}")
+        print(f"        editing {probe} now shows: "
+              f"{', '.join(after) or '(nothing)'}")
+    if len(e_lost) > 8:
+        print(f"      ... and {len(e_lost) - 8} more.")
+    if e_lost:
+        print("    -> A skill's `files:` is a union and matches broadly; the")
+        print("       entry names that path because it is ABOUT that path.")
+        print("       Trim the skill's refs, or raise maxRecall.")
     if regressed:
         print("")
-        print("  -> Each lost entry is now reachable by NOTHING. Fix by one of:")
-        print("     add the entry's tags/files to the skill that should cover it,")
-        print("     stamp the entry with `--mark <skill>`, or restore the entry.")
+        print("  -> A regressed entry is reachable by NOTHING. Fix by one of:")
+        print("     write its rule into the skill and cite the entry there,")
+        print("     add the entry's tags/files to that skill, or restore the")
+        print("     entry. A `consolidated_into:` stamp on its own does not")
+        print("     count: the skill has to say it.")
+    if regressed or e_lost:
         return 1
     print("")
-    print("  OK -- every query still reaches the entry, or the skill that "
-          "absorbed it.")
+    print("  OK -- every query still reaches its entry, or a skill that cites "
+          "it,")
+    print("       and every entry still surfaces for the paths it names.")
     return 0
 
 
@@ -313,20 +426,47 @@ def set_frontmatter_key(path, key, value):
     return "set"
 
 
-def cmd_mark(project, cfg, consolidated, skill, targets):
-    if skill not in {c["title"] for c in consolidated}:
+def cmd_mark(project, cfg, consolidated, skill, targets, force=False):
+    """Stamp `consolidated_into:`, but only where the skill earns it.
+
+    The stamp tells recall it may hide the entry behind the skill, so marking
+    an entry the skill never mentions is how a pass loses a lesson while every
+    count still looks right. So the skill's body has to cite the entry first --
+    which is what step 3 of /lore:consolidate asks for anyway. Write the rule,
+    link the entry, then mark it; not the other way round, and never in bulk
+    from a scorer.
+    """
+    by_name = {c["title"]: c for c in consolidated}
+    target_skill = by_name.get(skill)
+    if target_skill is None:
         dirs = cfg["consolidatedDirs"] or "(consolidatedDirs unset)"
         print(f"warning: no consolidated skill named '{skill}' is visible under "
               f"{dirs}.")
         print("         Marking anyway, but /lore:lint will flag these entries "
               "until the skill exists.")
-    rc = 0
+    rc, refused = 0, 0
     for t in targets:
+        rel = rel_path(project, Path(t))
+        if target_skill is not None and not skill_cites(target_skill, Path(t)):
+            if not force:
+                print(f"  {'refused: not cited':<30} {rel}")
+                refused += 1
+                rc = 1
+                continue
+            print(f"  {'forced: not cited':<30} {rel}")
         result = set_frontmatter_key(t, "consolidated_into", skill)
-        print(f"  {result:<30} {rel_path(project, Path(t))}")
+        print(f"  {result:<30} {rel}")
         if result.startswith("skip:"):
             rc = 1
     print("")
+    if refused:
+        print(f"  {refused} refused: `{skill}` does not mention them. Recall "
+              "would hide the")
+        print("  entry behind the skill, so the rule has to be IN the skill "
+              "first, with a")
+        print("  link to the entry. Write it, then mark. `--force` overrides "
+              "and is a")
+        print("  promise you checked by hand.")
     print("  Entries keep their tags, files, and body -- only the stamp changed.")
     return rc
 
@@ -474,6 +614,9 @@ def main():
                     help="extra parity queries, one per line (with --snapshot)")
     ap.add_argument("--mark", nargs="+", metavar="SKILL ENTRY",
                     help="stamp `consolidated_into: SKILL` on the given entries")
+    ap.add_argument("--force", action="store_true",
+                    help="with --mark: stamp even when the skill does not "
+                         "cite the entry")
     ap.add_argument("--prune", action="store_true",
                     help="list entries safe to delete (never deletes)")
     ap.add_argument("--log", metavar="TEXT",
@@ -499,7 +642,8 @@ def main():
         if len(args.mark) < 2:
             print("--mark needs a skill name and at least one entry path.")
             return 2
-        return cmd_mark(project, cfg, consolidated, args.mark[0], args.mark[1:])
+        return cmd_mark(project, cfg, consolidated, args.mark[0],
+                        args.mark[1:], args.force)
     if args.prune:
         return cmd_prune(project, cfg, entries, consolidated)
     if args.log is not None:

@@ -75,7 +75,7 @@ from _common import (consolidated_paths, find_project_dir, fold,  # noqa: E402
                      git_dirs, is_under, iter_consolidated,
                      iter_store_entries, load_config, norm_rel, ref_exists,
                      ref_matches, rel_path, resolve_consolidated, revisit_due,
-                     store_dirs, words)
+                     skill_cites, store_dirs, words)
 
 # Generic words that would over-match. Domain words are intentionally absent.
 # Entries are diacritic-folded (see _common.fold), so accented fillers are
@@ -215,6 +215,13 @@ def absorb_consolidated(project, matched, merge=None):
     `consolidated_into: <skill>` is dropped WHEN that skill is itself among the
     matches -- there, the skill is the shorter, current statement of the same
     rules, and showing both spends context twice on one lesson. The absorbed
+    An entry is absorbed only when the skill's body CITES it (see
+    `skill_cites`). The `consolidated_into:` stamp records an intention; the
+    citation is the evidence that the rule is actually in the skill. Without
+    that check this hid entries behind summaries that never mentioned them --
+    on a real pass, 411 of 411 stamped entries were cited by nothing, and the
+    shortest skill absorbing four of them was 32 words, truncated mid-sentence.
+
     `merge(skill_weight, entry_weight)` decides what the absorbing skill's
     weight becomes -- prompt recall hands the skill the better of the two
     scores, so taking an entry's place never costs the skill that entry's rank.
@@ -246,6 +253,8 @@ def absorb_consolidated(project, matched, merge=None):
         slot = slot_of.get(id(target)) if target is not None else None
         if slot is None:
             continue  # the skill did not match -- the entry is all there is
+        if not skill_cites(target, e):
+            continue  # stamped, but the skill never says it: show both
         absorbed.add(i)
         if merge is not None:
             items[slot][0] = merge(items[slot][0], weight)
@@ -308,12 +317,16 @@ def match_by_file(targets, stores, cfg, consolidated=(), project=None):
     the prompt scorer) so that truncating to `maxRecall` can never drop a live
     learning in favour of a superseded one; ties keep store order.
 
-    A consolidated skill competes here on the same terms -- on its own `files:`,
-    which is why /lore:consolidate carries the absorbed entries' refs into the
-    skill's frontmatter. It is preferred over the entries it absorbed, but only
-    when its OWN refs cover the file being edited: an entry whose `files:` names
-    a path the skill's does not is still the only thing that knows about that
-    path, and is surfaced.
+    A consolidated skill competes here on its own `files:` -- but BEHIND the
+    entries, which is the opposite of the prompt scorer. At edit time the entry
+    is the precise artefact: it names this path because it is about this path,
+    and it holds the root cause. A skill's `files:` is a union over everything
+    it summarizes, so it matches far more paths far more weakly, and ahead of
+    the entries it would spend every one of the `maxRecall` slots on broad
+    matches. Measured on a real pass when skills sorted first: of 853
+    (entry, path) pairs where the entry used to surface for its own path, 853
+    stopped -- the skills took every slot, and 312 entries lost every path they
+    named.
     """
     if isinstance(targets, str):
         targets = [targets]
@@ -325,9 +338,9 @@ def match_by_file(targets, stores, cfg, consolidated=(), project=None):
         refs = [f for f in e["files"] if f]
         if any(ref_matches(f, t) for f in refs for t in targets):
             matches.append(((e["status"] in stale_set,
-                             0 if e.get("consolidated") else 1), e))
+                             1 if e.get("consolidated") else 0), e))
     matches = absorb_consolidated(project, matches)
-    matches.sort(key=lambda m: m[0])  # current first, then the skill
+    matches.sort(key=lambda m: m[0])  # current first, then entries before skills
     return [(e["status"] in stale_set, e) for _w, e in matches]
 
 
