@@ -345,6 +345,15 @@ def _prunable(project, entries, consolidated, stale_set):
     return out
 
 
+# A path safe to paste into any shell unquoted. The store is committed, so its
+# filenames come from the repo -- a crafted name could otherwise turn the
+# `git rm` line below into whatever its author wanted, and that line exists to
+# be copied into a terminal. Cross-platform quoting is not worth attempting
+# (shlex is POSIX-only, and this prints on Windows too), so anything outside
+# this set is listed for manual deletion instead of being quoted.
+_SHELL_SAFE = re.compile(r"^[A-Za-z0-9._/@+-]+$")
+
+
 def cmd_prune(project, cfg, entries, consolidated):
     stale_set = set(cfg["staleStatuses"])
     cands = _prunable(project, entries, consolidated, stale_set)
@@ -365,13 +374,24 @@ def cmd_prune(project, cfg, entries, consolidated):
             print("   that drive edit-time recall, none of which fits in a "
                   "summary.)")
         return 0
+    rels = []
     for e, target in cands:
-        print(f"  - {rel_path(project, e['path'])}  [{e['status']}] -> "
-              f"{target['title']}")
+        rel = rel_path(project, e["path"])
+        rels.append(rel)
+        print(f"  - {rel}  [{e['status']}] -> {target['title']}")
+    safe = [r for r in rels if _SHELL_SAFE.match(r)]
+    unsafe = [r for r in rels if r not in safe]
     print("")
     print("  Review each one, then delete the ones you agree with:")
-    print("    git rm " + " ".join(
-        f'"{rel_path(project, e["path"])}"' for e, _t in cands))
+    if safe:
+        print("    git rm -- " + " ".join(safe))
+    if unsafe:
+        print("")
+        print("  These names contain characters a shell would interpret, so they")
+        print("  are NOT in the command above -- delete them by hand:")
+        for r in unsafe:
+            print(f"    - {r}")
+    print("")
     print("  Then re-run `--compare` and `/lore:lint` before committing.")
     return 0
 

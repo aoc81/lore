@@ -454,6 +454,21 @@ class TestPlanAndPrune(LayerCase):
         self.assertNotIn("stale-unmarked.md", out)
         self.assertIn("git rm", out)
 
+    def test_prune_does_not_put_a_crafted_filename_in_a_shell_command(self):
+        # The store is committed, so its filenames come from the repo, and the
+        # `git rm` line is printed to be pasted into a terminal.
+        write_skill(self.project, "lore-ci", description="CI", tags=("ci",))
+        write_entry(self.store, "ci/ok.md", title="Fine", tags=("ci",),
+                    status="superseded", consolidated_into="lore-ci")
+        write_entry(self.store, 'ci/a; echo pwned #.md', title="Crafted",
+                    tags=("ci",), status="superseded",
+                    consolidated_into="lore-ci")
+        _rc, out = self.run_cli(["--prune"])
+        cmd = next(ln for ln in out.splitlines() if "git rm" in ln)
+        self.assertIn("learnings/ci/ok.md", cmd)
+        self.assertNotIn("echo pwned", cmd)
+        self.assertIn("delete them by hand", out)
+
     def test_prune_never_deletes(self):
         write_skill(self.project, "lore-ci", description="CI", tags=("ci",))
         p = write_entry(self.store, "ci/both.md", title="Stale", tags=("ci",),
