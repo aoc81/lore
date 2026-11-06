@@ -46,7 +46,7 @@ from _common import (LOG_NAME, body_words, find_project_dir,  # noqa: E402
                      shell_safe, store_dirs)
 from recall import rank_matches  # noqa: E402
 
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 
 
 def _entries(project, cfg):
@@ -160,28 +160,33 @@ def cmd_plan(project, cfg, entries, consolidated, category=None):
 
 # --- recall parity -----------------------------------------------------------
 
-def _queries(entries, extra_file=None):
-    """The parity query set: one query per entry, plus any from `extra_file`.
+def _queries(project, entries, extra_file=None):
+    """`{query: primary_entry_path_or_None}` -- the parity probes.
 
-    An entry's own title + tags is the sharpest possible probe for it -- it is
-    literally what the scorer matches on. If that query stops reaching the entry
-    (or the skill that absorbed it), consolidation broke recall for the one
+    An entry's own title + tags is the sharpest possible probe for it: it is
+    literally what the scorer matches on. That entry is the query's PRIMARY --
+    the one result the query exists to check. If a query stops reaching its
+    primary (or the skill that absorbed it), consolidation broke recall for the
     prompt most likely to need it.
+
+    Queries from `extra_file` have no primary: they are the project's own
+    golden questions, checked for an answer rather than for a specific entry.
     """
-    qs = []
+    qs = {}
     for e in entries:
         q = " ".join([e["title"]] + list(e["tags"])).strip()
-        if q:
-            qs.append(q)
+        if q and q not in qs:
+            qs[q] = rel_path(project, e["path"])
     if extra_file:
         try:
             for line in Path(extra_file).read_text(
                     encoding="utf-8").splitlines():
-                if line.strip() and not line.lstrip().startswith("#"):
-                    qs.append(line.strip())
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    qs.setdefault(line, None)
         except OSError as exc:
             print(f"warning: could not read {extra_file}: {exc}")
-    return list(dict.fromkeys(qs))
+    return qs
 
 
 def _answers(project, cfg, queries, stores, consolidated):
@@ -194,13 +199,16 @@ def _answers(project, cfg, queries, stores, consolidated):
 
 def cmd_snapshot(project, cfg, entries, consolidated, path, extra_file):
     stores = _live_stores(project, cfg)
-    queries = _queries(entries, extra_file)
-    answers = _answers(project, cfg, queries, stores, consolidated)
+    queries = _queries(project, entries, extra_file)
+    answers = _answers(project, cfg, list(queries), stores, consolidated)
     Path(path).write_text(json.dumps({
         "version": SNAPSHOT_VERSION,
         "taken": datetime.date.today().isoformat(),
         "maxRecall": cfg["maxRecall"],
         "queries": answers,
+        # The entry each query exists to find. Without it, --compare cannot
+        # tell a lost lesson from a result pushed out of the top maxRecall.
+        "primaries": {q: p for q, p in queries.items() if p},
     }, indent=1, sort_keys=True), encoding="utf-8")
     answered = sum(1 for v in answers.values() if v)
     print(f"Recall snapshot written to {path}")
@@ -209,14 +217,16 @@ def cmd_snapshot(project, cfg, entries, consolidated, path, extra_file):
     return 0
 
 
-def _excused(project, lost, after, entries_by_rel, consolidated):
-    """True when a path dropping out of a query's answers is EXPECTED.
+def _reachable(project, lost, after, entries_by_rel, consolidated):
+    """True when a path missing from a query's answers is still REACHABLE.
 
-    Two legitimate reasons: the entry was absorbed and the skill that absorbed
-    it answers the query instead, or the entry is gone from disk entirely (a
-    pruned stale entry) and the query is still answered by something. Anything
-    else is a real loss of recall.
+    Three legitimate reasons: the entry is in the answers after all; the skill
+    that absorbed it answers the query instead; or the entry is gone from disk
+    entirely (a pruned stale entry) and the query is still answered by
+    something. Anything else is a real loss of recall.
     """
+    if lost in after:
+        return True
     e = entries_by_rel.get(lost)
     if e is None:
         return bool(after)  # entry deleted; the topic is still reachable
@@ -238,25 +248,44 @@ def cmd_compare(project, cfg, entries, consolidated, path):
     after = _answers(project, cfg, list(before), stores, consolidated)
     by_rel = {rel_path(project, e["path"]): e for e in entries}
 
-    unchanged, absorbed, regressed = 0, 0, []
+    primaries = snap.get("primaries")
+    if not isinstance(primaries, dict):
+        primaries = {}
+
+    # Two different things drop out of a query's answers, and only one is a
+    # failure. The PRIMARY is the entry the query exists to find; losing it
+    # (and the skill that absorbed it) means a lesson became unreachable.
+    # Anything else that leaves the top `maxRecall` was incidental to that
+    # query and has its own query of its own -- adding a layer reshuffles the
+    # tail by design, and reporting that as a regression buries the real one.
+    # A v1 snapshot carries no primaries; every path is then treated as one,
+    # which is the old, noisier behaviour.
+    kept, absorbed, regressed, reshuffled = 0, 0, [], 0
     for q, was in before.items():
         now = after.get(q, [])
-        lost = [p for p in was if p not in now]
-        if not lost:
-            unchanged += 1
-            continue
-        bad = [p for p in lost
-               if not _excused(project, p, now, by_rel, consolidated)]
+        primary = primaries.get(q)
+        checked = [primary] if primary else list(was)
+        bad = [p for p in checked
+               if not _reachable(project, p, now, by_rel, consolidated)]
         if bad:
             regressed.append((q, bad, now))
-        else:
+            continue
+        if primary and primary not in now:
             absorbed += 1
+        elif [p for p in was if p not in now]:
+            reshuffled += 1
+            kept += 1
+        else:
+            kept += 1
 
     print(f"Recall parity check -- {len(before)} queries replayed against the "
           "store as it is now")
-    print(f"  unchanged:                        {unchanged}")
-    print(f"  answered by a consolidated skill: {absorbed}")
+    print(f"  primary still found:              {kept}")
+    print(f"  primary now answered by its skill: {absorbed}")
     print(f"  REGRESSED (no longer reachable):  {len(regressed)}")
+    if reshuffled:
+        print(f"    (of those, {reshuffled} saw other results leave the top "
+              f"{cfg['maxRecall']} -- expected when a layer is added)")
     for q, bad, now in regressed[:20]:
         print("")
         print(f"    query: {q[:110]}")
@@ -272,7 +301,7 @@ def cmd_compare(project, cfg, entries, consolidated, path):
         print("     stamp the entry with `--mark <skill>`, or restore the entry.")
         return 1
     print("")
-    print("  OK -- every query still reaches the entry, or the skill that "
+    print("  OK -- every query still reaches its entry, or the skill that "
           "absorbed it.")
     return 0
 
