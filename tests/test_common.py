@@ -536,13 +536,16 @@ class TestHostUnsafeKeys(unittest.TestCase):
 
     def test_plain_scalar_with_colon_space_is_flagged(self):
         p = self._write("name: lore-ci\ndescription: CI invariants: the gate\n")
-        self.assertEqual(host_unsafe_keys(p), ["description"])
+        self.assertEqual(host_unsafe_keys(p), [("description", "breaks")])
         # lore itself reads it fine -- which is why it needs reporting
         self.assertIn("the gate", read_frontmatter(p)["description"])
 
-    def test_plain_scalar_with_hash_is_flagged(self):
+    def test_plain_scalar_with_hash_truncates_rather_than_breaks(self):
+        # Verified against a strict parser: " #" PARSES, and cuts the value at
+        # the comment ("backlog (epic"). A different symptom from ": ", so the
+        # report has to distinguish them.
         p = self._write("description: backlog (epic #53) notes\n")
-        self.assertEqual(host_unsafe_keys(p), ["description"])
+        self.assertEqual(host_unsafe_keys(p), [("description", "truncates")])
 
     def test_quoted_block_and_list_values_are_safe(self):
         for body in ('description: "CI: gate"\n',

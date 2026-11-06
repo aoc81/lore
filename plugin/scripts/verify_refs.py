@@ -48,10 +48,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (DEFAULTS, body_words, config_issues,  # noqa: E402
                      find_project_dir, git_dirs, host_unsafe_keys,
                      iter_consolidated, iter_entries, load_config, norm_rel,
-                     personal_store,
-                     ref_exists, ref_matches, rel_path, resolve_consolidated,
-                     revisit_due, shell_safe, skill_body, stale_after_days,
-                     words)
+                     personal_store, ref_exists, ref_matches, rel_path,
+                     resolve_consolidated, revisit_due, shell_safe,
+                     skill_body, stale_after_days, unsafe_effect, words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -316,13 +315,13 @@ def _print_consolidation_issues(project, cfg, dangling, missing_links, oversize,
               "Claude Code cannot parse:")
         for c, keys in unloadable:
             print(f"  {rel_path(project, c['path'])}")
-            print(f"    - unquoted ': ' or ' #' in: {', '.join(keys)}")
-        print("\n  -> YAML rejects a plain scalar containing ': ' and treats ' #' as a")
-        print("     comment, so the host drops the WHOLE block and falls back to the")
-        print("     first heading -- the skill keeps working as a file and silently")
-        print("     loses the description that decides when it loads. Quote the value,")
-        print("     or write it as a `>-` block scalar. (Lore's own parser is lenient")
-        print("     and reads these fine, which is why nothing else reports it.)")
+            for key, kind in keys:
+                needle, effect = unsafe_effect(kind)
+                print(f"    - {key}: unquoted '{needle}' -- {effect}")
+        print("\n  -> Either way the skill keeps working as a file and loses the")
+        print("     description that decides when it loads. Quote the value, or write")
+        print("     it as a `>-` block scalar. (Lore's own parser is lenient and reads")
+        print("     these fine, which is why nothing else reports it.)")
     if oversize:
         limit = cfg["consolidatedMaxWords"]
         print(f"\nnote: {len(oversize)} consolidated skill(s) over the "

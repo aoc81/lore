@@ -105,11 +105,10 @@ def cmd_plan(project, cfg, entries, consolidated, category=None):
         if unloadable:
             print(f"    ! frontmatter the host cannot parse: {len(unloadable)}")
             for c, keys in unloadable[:5]:
-                print(f"      - {rel_path(project, c['path'])}  "
-                      f"(unquoted ': ' or ' #' in {', '.join(keys)})")
-            print("      Claude Code drops the whole block and uses the first")
-            print("      heading, so the skill loses its trigger text. Quote the")
-            print("      value or use a `>-` block scalar.")
+                shown = ", ".join(f"{k} ({kind})" for k, kind in keys)
+                print(f"      - {rel_path(project, c['path'])}  {shown}")
+            print("      The skill loses the trigger text that decides when it")
+            print("      loads. Quote the value or use a `>-` block scalar.")
 
     live = [e for e in entries if e["status"] not in stale_set]
     done, dangling, todo = [], [], []

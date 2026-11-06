@@ -292,12 +292,29 @@ def _strip_comment(s):
 # header reads every correctly-written long description as ">-".
 _BLOCK_HEAD = re.compile(r"^([|>])([+-]?)$")
 
-# What a plain (unquoted) YAML scalar may not contain. `: ` ends the key/value
-# mapping and invalidates the document; ` #` starts a comment and silently
-# truncates the value. Claude Code drops a SKILL.md's whole frontmatter when it
-# does not parse and falls back to the first heading, so a skill written this
-# way loses its trigger text with nothing reported.
-_PLAIN_UNSAFE = (": ", " #")
+# What a plain (unquoted) YAML scalar may not contain -- two DIFFERENT failures,
+# verified against a strict parser:
+#   ": "  -> ScannerError: the whole document is invalid, so Claude Code throws
+#            the frontmatter away and falls back to the file's first heading.
+#   " #"  -> parses fine and the value is TRUNCATED at the comment
+#            ("backlog (epic #53) notes" -> "backlog (epic").
+# Both lose the trigger text; they look nothing alike when you go looking, so
+# the report has to say which one you have.
+_PLAIN_UNSAFE = {
+    ": ": "breaks",
+    " #": "truncates",
+}
+
+_UNSAFE_EFFECT = {
+    "breaks": (": ", "the whole frontmatter fails to parse; the host falls "
+                     "back to the first heading"),
+    "truncates": (" #", "the value is silently cut at the comment"),
+}
+
+
+def unsafe_effect(kind):
+    """`(needle, consequence)` for a `host_unsafe_keys` kind, for reporting."""
+    return _UNSAFE_EFFECT.get(kind, ("", "the value is not read as written"))
 
 
 def _block_scalar(lines, i, style):
@@ -613,21 +630,24 @@ def body_words(path):
 
 
 def host_unsafe_keys(path):
-    """Frontmatter keys whose PLAIN scalar a YAML parser would reject, or None.
+    """`[(key, kind)]` for plain scalars a strict YAML parser mishandles.
 
-    None means there is no frontmatter block at all. The distinction matters
-    for a consolidated skill, because Claude Code reads `name` and
-    `description` from it and, when the block does not parse, falls back to the
-    file's first heading -- so the skill keeps working as a file and silently
-    loses the one line that decides when it loads. Lore's own parser is
-    line-based and lenient, so it reads those descriptions perfectly well and
-    would otherwise never notice the host had thrown them away.
+    `kind` is "breaks" (an unquoted ": ", which invalidates the document) or
+    "truncates" (an unquoted " #", which parses but cuts the value at the
+    comment) -- see `_UNSAFE_EFFECT`. Returns None when there is no
+    frontmatter block at all, which is a different thing from no problems.
 
-    Measured on one real consolidation: 42 of 47 skills had a `description:`
-    containing an unquoted ": ", every one of them indexed happily by recall
-    and none of them loadable by the host.
+    This matters for a consolidated skill because Claude Code reads `name` and
+    `description` from that block, and either failure costs the skill the one
+    line that decides when it loads. Lore's own parser is line-based and
+    lenient, so it reads those descriptions perfectly well and would otherwise
+    never notice the host had thrown them away.
 
-    Quoting the value, or writing it as a `>-` block scalar, fixes it.
+    Measured on one real consolidation: 43 of 47 skills -- 42 broken by ": "
+    and one truncated by " #" -- every one indexed happily by recall and none
+    carrying the description the host would show.
+
+    Quoting the value, or writing it as a `>-` block scalar, fixes both.
     """
     try:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -646,8 +666,10 @@ def host_unsafe_keys(path):
             continue  # a list, or a block scalar: both are safe
         if value[0] in "\"'" or value.startswith("["):
             continue  # quoted, or a flow sequence
-        if any(u in value for u in _PLAIN_UNSAFE):
-            bad.append(key)
+        for needle, kind in _PLAIN_UNSAFE.items():
+            if needle in value:
+                bad.append((key, kind))
+                break
     return bad
 
 
