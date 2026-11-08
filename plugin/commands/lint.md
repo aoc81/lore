@@ -22,7 +22,9 @@ a learning that is gone · `--report` = git drift triage
 (entries whose code changed since they were verified) plus decisions whose `revisit:`
 date has come · `--dupes` = near-duplicate
 triage (entry pairs with overlapping title/tags, e.g. parallel captures from
-teammates, plus category-name variants) · `--index` = regenerate the store README ·
+teammates, plus category-name variants) · `--index` = regenerate the store README's
+index **below its `## Index` heading**, keeping everything above it byte for byte, so
+your own sections survive (it says how many lines it kept) ·
 `--strict` = exit non-zero on actionable issues (useful in CI).
 
 After running, briefly summarize what it found and suggest the next step (fix a path,

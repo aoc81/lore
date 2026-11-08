@@ -22,3 +22,8 @@ sample, and run `/lore:lint --index` once you have real entries.
 > A learning about **how one person likes to work** belongs in the private
 > `personalStoreDir` instead (see the plugin's README) — recall reads it too, but it
 > never lands here.
+
+## Index
+
+_Everything above this heading is yours to edit; `/lore:lint --index` rewrites
+only from here down._

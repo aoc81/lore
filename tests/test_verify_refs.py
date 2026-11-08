@@ -201,6 +201,80 @@ class TestIndex(unittest.TestCase):
         self.assertIn("[Cache key](ci/cache.md)", text)
         self.assertIn("[Old way](ci/old.md) - **[SUPERSEDED]**", text)
 
+    def _regen(self, store, proj, cfg=None):
+        entries = list(iter_entries(store))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            verify_refs.cmd_index(entries, proj, cfg or dict(DEFAULTS), store)
+        return (store / "README.md").read_text(encoding="utf-8"), out.getvalue()
+
+    def test_hand_written_text_above_the_index_survives(self):
+        # `--index` used to rewrite the whole README from a hardcoded header,
+        # silently destroying a human's own sections. It regenerates the INDEX.
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            write_entry(store, "ci/cache.md", title="Cache key")
+            (store / "README.md").write_text(
+                "# Our store\n\n## How we work\n\nWeekly dream pass, see "
+                "WEEKLY_LOG.md.\n\n## Index (0 entries)\n\nold\n",
+                encoding="utf-8")
+            text, said = self._regen(store, proj)
+        self.assertIn("## How we work", text)
+        self.assertIn("Weekly dream pass, see WEEKLY_LOG.md.", text)
+        self.assertIn("## Index (1 entries)", text)
+        self.assertNotIn("old", text.split("## Index")[1])
+        self.assertIn("kept", said)  # it has to SAY what it preserved
+
+    def test_a_readme_without_an_index_heading_gets_the_default(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            write_entry(store, "ci/cache.md", title="Cache key")
+            text, said = self._regen(store, proj)
+        self.assertIn("One-fact-per-file record", text)
+        self.assertIn("default preamble", said)
+
+    def test_regenerating_twice_is_byte_identical(self):
+        # The point of a documented sort: a regenerated index can be compared
+        # with a committed one.
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            for i in range(4):
+                write_entry(store, f"ci/e{i}.md", title="Same title")
+            first, _ = self._regen(store, proj)
+            second, _ = self._regen(store, proj)
+            third, _ = self._regen(store, proj)
+        self.assertEqual(first, second)
+        self.assertEqual(second, third)
+
+    def test_a_note_without_frontmatter_is_titled_by_its_heading(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            (store / "arch").mkdir(parents=True)
+            (store / "arch" / "per-seat-metering.md").write_text(
+                "# Per-seat metering is prepaid only via lots\n\nBody.\n",
+                encoding="utf-8")
+            text, _ = self._regen(store, proj)
+        self.assertIn("[Per-seat metering is prepaid only via lots]"
+                      "(arch/per-seat-metering.md)", text)
+
+    def test_a_link_shaped_heading_falls_back_to_the_slug(self):
+        # Some repos run a docs link-checker that reads `[..](..)` anywhere, so
+        # copying such a heading into an index line invents a link to resolve.
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            store = proj / "learnings"
+            (store / "arch").mkdir(parents=True)
+            (store / "arch" / "linky.md").write_text(
+                "# See [the doc](../other.md) for details\n\nBody.\n",
+                encoding="utf-8")
+            text, _ = self._regen(store, proj)
+        self.assertIn("[linky](arch/linky.md)", text)
+        self.assertNotIn("../other.md", text)
+
 
 class TestStatsThreshold(unittest.TestCase):
     def test_unverified_count_follows_staleAfterMonths(self):
