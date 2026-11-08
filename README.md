@@ -152,7 +152,10 @@ changed since they were last `verified:` (your re-verify worklist — computed i
 streaming `git log` pass, not one subprocess per file), plus temporary decisions whose
 `revisit:` date has come; `--dupes` finds near-duplicate
 entry pairs (e.g. two teammates capturing the same gotcha on parallel branches) and
-category-name variants; `--index` regenerates the store's README. `/lore:stats` prints a
+category-name variants; `--index` regenerates the store README's index — only what sits
+below its `## Index` heading, so any sections you wrote above it are preserved, and the
+generated part is byte-stable so a regenerated index can be diffed against a committed
+one. `/lore:stats` prints a
 store-health snapshot (counts by status/category, the drift backlog, long-unverified
 entries, recall activity — including entries that never surface and entries that
 surface but are never read — near-duplicate count, dangling links). The optional
@@ -192,7 +195,7 @@ One fact per file, `learnings/<category>/<slug>.md`, with frontmatter:
 
 ```markdown
 ---
-title: "Short, specific — this is what recall matches on"
+title: "Short, specific — this is what recall matches on"   # absent? the file's first heading, then its slug
 date: 2026-01-01
 track: knowledge        # or: bug
 category: ci

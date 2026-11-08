@@ -414,6 +414,38 @@ def read_frontmatter(path):
         return None
 
 
+# An entry with no frontmatter `title:` used to be named by its filename slug.
+# Hand-written notes (no frontmatter at all) are common in a store that predates
+# lore, and a slug is a poor title: it is what recall matches on, and what the
+# generated index shows. The file's own first heading is the title its author
+# wrote, so prefer that and keep the slug as the last resort.
+_HEADING_RE = re.compile(r"^#{1,6}[ \t]+(\S.*?)[ \t]*#*[ \t]*$", re.M)
+_HEADING_HEAD_CHARS = 2048
+
+
+def first_heading(path):
+    """The first ATX heading's text in `path`, or "" when there is none.
+
+    A heading containing link-shaped text (`](`) is SKIPPED rather than used:
+    some repositories run a docs link-checker that reads `[..](..)` anywhere it
+    appears, so copying one into an index line creates a link that checker then
+    has to resolve. Falling back to the slug is the safe answer there.
+
+    Reads a bounded head, and only ever called for an entry whose frontmatter
+    gives no `title:` -- so the common path pays nothing.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(_HEADING_HEAD_CHARS)
+    except OSError:
+        return ""
+    for m in _HEADING_RE.finditer(head):
+        text = m.group(1).strip()
+        if text and "](" not in text:
+            return text
+    return ""
+
+
 def iter_entries(store, personal=False):
     """Yield a normalized dict per learning file under `store`.
 
@@ -436,9 +468,13 @@ def iter_entries(store, personal=False):
         files = fm.get("files") or []
         if isinstance(files, str):
             files = [files]
+        title = str(fm.get("title") or "").strip()
+        if not title:
+            # the author's own heading beats the filename slug; see first_heading
+            title = first_heading(p) or p.stem
         yield {
             "path": p,
-            "title": str(fm.get("title") or p.stem),
+            "title": title,
             "tags": [str(t) for t in tags],
             "files": [str(f) for f in files],
             "status": str(fm.get("status") or "current").lower(),
