@@ -1,0 +1,47 @@
+# A tag must declare the version its own tree contains, and must be on main.
+#
+# `v0.5.1` once pointed at a tree whose manifest still said `0.5.0`: the tag was
+# cut before the `chore: release` bump landed, so the tagged tree did not contain
+# the version it claimed. Nothing revealed it — the tag, the release and the
+# manifest each looked right alone — and moving a published tag is destructive,
+# so the only cheap fix is to never create a wrong one.
+#
+# ci.yml cannot cover this: it runs on pushes to main and on pull requests, and a
+# tag push is neither.
+
+name: tag-matches-manifest
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the ancestry check below needs main's history
+
+      - name: Both manifests declare the tag's own version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python .github/check_tag_version.py
+
+      - name: The tag is reachable from main
+        run: |
+          set -eu
+          # ^{commit} because an annotated tag's ref resolves to the tag object.
+          commit=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} ($commit) is not an ancestor of" \
+                 "main. A commit on a branch whose PR already merged lands" \
+                 "nowhere, and tagging it would publish a tree main does not" \
+                 "have. Land the commit on main first, then re-tag."
+            exit 1
+          fi
+          echo "OK  ${GITHUB_REF_NAME} ($commit) is on main."

@@ -1,0 +1,59 @@
+# A PR that changes what ships must not leave the manifest on a version that has
+# already been published.
+#
+# `/plugin marketplace add aoc81/lore` clones the DEFAULT BRANCH, not a tag, so
+# whatever version main carries is handed to every installer the moment it lands,
+# tag or no tag. Merging a change under a number that already shipped puts two
+# different trees under one version: installs claiming it could be either, and
+# `claude plugin update` sees nothing to act on, so the fix never reaches anyone
+# who already installed.
+#
+# This repo has hit it: PR #17's fixes landed on main still reading 0.7.5, the
+# number v0.7.5 had already shipped, and nothing said so until someone looked.
+#
+# Path-filtered to `plugin/**` — only what actually ships needs a number of its
+# own, so a change to tests, CI or the README does not ask for a bump.
+
+name: version-is-unpublished
+
+on:
+  pull_request:
+    paths: ["plugin/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The manifest version has not shipped before
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          version=$(python .github/read_version.py)
+          echo "manifest version: $version"
+
+          # Either surface having it means main has already served it. The tag
+          # is checked first because it is the cheaper and the more durable
+          # record: a release can be deleted, a tag usually is not.
+          spent=""
+          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" >/dev/null 2>&1; then
+            spent="tag v${version}"
+          elif gh release view "v${version}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            spent="release v${version}"
+          fi
+
+          if [ -n "$spent" ]; then
+            echo "::error::${spent} already exists, so ${version} has already" \
+                 "been served from main. Merging this would put a second tree" \
+                 "under one version: \`claude plugin update\` would see nothing" \
+                 "to do. Bump the patch in all three version fields" \
+                 "(plugin/.claude-plugin/plugin.json and the two in" \
+                 ".claude-plugin/marketplace.json)."
+            exit 1
+          fi
+          echo "OK  ${version} is unpublished: no tag and no release carries it."
