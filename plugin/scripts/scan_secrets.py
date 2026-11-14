@@ -67,11 +67,13 @@ _RULES = [
      # even once the whole form was recognised as a placeholder. A separating
      # space is unaffected (`password: -x` still matches).
      r"[A-Za-z0-9_.-]{0,40}\s*(?::(?!-)|=)\s*"
-     # `<...>` and `$(...)` get their own alternatives because they may contain
-     # spaces: the general branch stops at the first one, so `<staging token>`
-     # and `$(docker ... printenv TOKEN)` would reach the filter below as
-     # `<staging` and `$(docker` -- no longer the placeholders they plainly are.
-     r"['\"]?(<[^>]*>|\$\([^)]*\)|\([^)\s]*\s[^)]*\)|[^\s'\"]{6,})['\"]?"),
+     # `<...>`, `$(...)` and a PowerShell `(Verb-Noun ...)` call get their own
+     # alternatives because they may contain spaces: the general branch stops
+     # at the first one, so `<staging token>` would reach the filter below as
+     # `<staging`. Each is exactly as wide as the placeholder form it feeds --
+     # anything wider turns lines the general branch never matched (`<>`,
+     # `(ask Will)`) into new findings.
+     r"['\"]?(<[^>]+>|\$\([^)]*\)|\([a-z]+-[a-z]+\s[^)]*\)|[^\s'\"]{6,})['\"]?"),
 ]
 RULES = [(name, re.compile(pat)) for name, pat in _RULES]
 
@@ -85,20 +87,25 @@ _PLACEHOLDER = re.compile(
     # Interpolation and command substitution, as actually written in shell:
     # `${VAR}` was covered, `${VAR:-default}`, `${A:-${B:-}}` and `$(cmd arg)`
     # were not -- and a learning quotes the latter far more often.
-    r"\$\{.*\}|\$\([^)]*\)|\$[a-z0-9_]+|%[a-z0-9_]+%|"
-    # A parenthesised expression with a space in it is code, not a literal --
-    # PowerShell's `(Get-Content .env.local | ...)`. The space is required, so
-    # `(foobar)` stays a finding.
-    r"\([^)]*\s[^)]*\)|"
+    # A `$name` with digits is only a variable when it is spelled like one
+    # (`$API_KEY2`); in lower case it is as likely a password that starts
+    # with `$`.
+    r"\$\{.*\}|\$\([^)]*\)|\$[a-z_]+|(?-i:\$[A-Z_][A-Z0-9_]*)|%[a-z0-9_]+%|"
+    # A PowerShell call, `(Get-Content .env.local | ...)`. Any bracketed text
+    # with a space in it is too wide: `(the real one is ...)` is prose.
+    r"\([a-z]+-[a-z]+\s[^)]*\)|"
     r"your[_-].*|my[_-].*|some[_-].*|example.*|sample.*|dummy.*|fake.*|"
-    # Values that announce they are not real, matched at either end: the
-    # spellings that occur are `local-test` and `...-token-change-if-shared`,
-    # never a bare `test` or `changeme`. A separator is required, so a word
-    # that is merely a substring of a real value (`Testable8f7d6s5a4`) is
-    # still a finding -- the same reason the line above spells `test[_-]`.
-    r"(?:test|local|localhost|dev|staging)(?:[_.:-][a-z0-9_.:+-]*)?|"
-    r"[a-z0-9_.:-]*[_.-](?:example|sample|dummy|fake|test|local|dev|staging)|"
-    r"[a-z0-9_.-]*change[_-]?(?:me|it|if|this|before)[a-z0-9_.-]*|"
+    r"test[_-].*|"
+    # Values that announce they are not real: `local-test`, `postgres_dev`,
+    # `...-token-change-if-shared`. The label only disarms a value made of
+    # plain lower-case words -- one digit or capital anywhere and it stays a
+    # finding, because `staging-8f7d6s5a` and `Hunter2-dev` are credentials
+    # that happen to say where they are used.
+    r"(?-i:(?:[a-z]+[_.:-])*"
+    r"(?:test|local|localhost|dev|staging|example|sample|dummy|fake)"
+    r"(?:[_.:-][a-z]+)*)|"
+    r"localhost:\d{1,5}|"
+    r"(?:[a-z]+[_.-])*change[_-]?(?:me|it|if|this|before)(?:[_.-][a-z]+)*|"
     r"changeme|placeholder|redacted|none|null|true|false|"
     r"pass|passwd|password|pwd|secret|user|username|admin|host|hostname"
     r")$",
