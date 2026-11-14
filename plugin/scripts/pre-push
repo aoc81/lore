@@ -15,16 +15,23 @@
 root=$(git rev-parse --show-toplevel)
 PY=$(command -v python3 || command -v python || command -v py)
 
-if [ -n "$PY" ] && [ -f "$root/.lore/scan_secrets.py" ]; then
-  if ! "$PY" "$root/.lore/scan_secrets.py" --quiet; then
-    if [ "$LORE_SCAN_BLOCK" = "0" ]; then
-      echo "lore: secrets found but LORE_SCAN_BLOCK=0 — allowing push anyway." >&2
-    else
-      echo "" >&2
-      echo "lore: push ABORTED — a likely secret is in the learnings store (see above)." >&2
-      echo "      Remove/rotate it, or bypass with: git push --no-verify" >&2
-      exit 1
-    fi
+# A guard that cannot run must not be silent about it: saying nothing here is
+# indistinguishable from a clean scan, so the store looks gated while nothing
+# checks it. The push is not blocked — the hook's job is to stop secrets, not to
+# enforce its own installation — but it never passes quietly.
+if [ -z "$PY" ]; then
+  echo "lore: no python on PATH — the secret scan did NOT run for this push." >&2
+elif [ ! -f "$root/.lore/scan_secrets.py" ]; then
+  echo "lore: .lore/scan_secrets.py is missing — the secret scan did NOT run" >&2
+  echo "      for this push. Re-run /lore:init to restore it." >&2
+elif ! "$PY" "$root/.lore/scan_secrets.py" --quiet; then
+  if [ "$LORE_SCAN_BLOCK" = "0" ]; then
+    echo "lore: secrets found but LORE_SCAN_BLOCK=0 — allowing push anyway." >&2
+  else
+    echo "" >&2
+    echo "lore: push ABORTED — a likely secret is in the learnings store (see above)." >&2
+    echo "      Remove/rotate it, or bypass with: git push --no-verify" >&2
+    exit 1
   fi
 fi
 
