@@ -17,8 +17,9 @@ PY=$(command -v python3 || command -v python || command -v py)
 Modes: no args = file-reference existence check, plus `status:`/dates (`date:`,
 `verified:`, `revisit:`) the hooks would misread (a typo'd status is served as live guidance), plus a
 note about any `.lore.json` keys the hooks ignore — typos, wrong types — plus a warning
-when nothing scans the store for secrets before a push (no `pre-push` hook, one owned by
-another tool, a custom `core.hooksPath`, or a missing `.lore/scan_secrets.py`) — and, with a
+when nothing scans the store for secrets before a push (no `pre-push` hook, one that does
+not run the scan — yours, another tool's, or the one a custom `core.hooksPath` names — or a
+missing `.lore/scan_secrets.py`) — and, with a
 consolidated layer, entries stamped for a skill that does not exist and skills citing
 a learning that is gone · `--report` = git drift triage
 (entries whose code changed since they were verified) plus decisions whose `revisit:`

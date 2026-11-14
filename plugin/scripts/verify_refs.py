@@ -175,6 +175,15 @@ def personal_store_warning(project, cfg):
     return None
 
 
+# Where a hook manager keeps the commands its shim runs. husky 9 points
+# core.hooksPath at `.husky/_`, whose `pre-push` only dispatches to this one.
+_HOOK_MANAGER_FILES = (
+    ".husky/pre-push",
+    ".pre-commit-config.yaml",
+    "lefthook.yml", "lefthook.yaml", ".lefthook.yml", ".lefthook.yaml",
+)
+
+
 def hook_warning(project, cfg):
     """Warn when nothing scans the store for secrets before a push, or None.
 
@@ -188,7 +197,9 @@ def hook_warning(project, cfg):
 
     Silent when there is no team store (nothing published to protect) or when a
     workflow already runs the scan at the PR boundary, which covers teammates
-    too and is the stronger guarantee.
+    too and is the stronger guarantee. Also silent once the scan is wired into
+    the hook that actually runs -- the one `core.hooksPath` names, or the hook
+    manager a shim hands off to -- since that is what the messages ask for.
     """
     project = Path(project)
     if not (project / cfg["storeDir"]).is_dir():
@@ -210,22 +221,45 @@ def hook_warning(project, cfg):
             capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
-    if hooks_path.stdout.strip():
-        return ("note: core.hooksPath is set, so /lore:init could not install "
-                "the pre-push secret scan -- add `python .lore/scan_secrets.py "
-                "--quiet || exit 1` to your own pre-push hook.")
-    hook = common / "hooks" / "pre-push"
-    if not hook.is_file():
-        return ("warning: no pre-push hook -- nothing scans the store for "
-                "secrets before it is published. Run /lore:init to install it.")
-    try:
-        installed = hook.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    if "scan_secrets" not in installed:
+    custom = hooks_path.stdout.strip()
+    # A relative core.hooksPath is resolved against the top of the worktree.
+    hooks_dir = (project / Path(custom).expanduser()) if custom \
+        else common / "hooks"
+    hook = hooks_dir / "pre-push"
+    # A hook is often a shim that hands off to a manager, so the scan may be
+    # wired where the manager reads its commands rather than in the hook file.
+    # Every message below tells the user to add the scan; whichever of these
+    # places they add it to has to make the message stop, or it is a nag that
+    # doing the right thing cannot silence.
+    # A manager's config only counts while a hook exists to dispatch to it: the
+    # config is committed, the shim is per-clone, and without the shim nothing
+    # runs.
+    candidates = [hook]
+    if hook.is_file():
+        candidates += [project / rel for rel in _HOOK_MANAGER_FILES]
+    wired = False
+    for candidate in candidates:
+        try:
+            if "scan_secrets" in candidate.read_text(encoding="utf-8",
+                                                     errors="replace"):
+                wired = True
+                break
+        except OSError:
+            continue
+    if not wired:
+        if custom:
+            return ("note: core.hooksPath is set, so /lore:init could not "
+                    "install the pre-push secret scan -- add `python "
+                    ".lore/scan_secrets.py --quiet || exit 1` to your own "
+                    "pre-push hook.")
+        if not hook.is_file():
+            return ("warning: no pre-push hook -- nothing scans the store for "
+                    "secrets before it is published. Run /lore:init to "
+                    "install it.")
         return ("warning: a pre-push hook exists but does not run the secret "
                 "scan -- /lore:init never overwrites one it did not write. Add "
-                "`python .lore/scan_secrets.py --quiet || exit 1` to it.")
+                "`python .lore/scan_secrets.py --quiet || exit 1` to it, or to "
+                "the pre-push stage of the hook manager it hands off to.")
     if not (project / ".lore" / "scan_secrets.py").is_file():
         return ("warning: the pre-push hook runs .lore/scan_secrets.py, which "
                 "is missing -- every push skips the scan. Re-run /lore:init.")
