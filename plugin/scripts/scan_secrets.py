@@ -62,20 +62,79 @@ _RULES = [
      r"(?i)(?:^|[^A-Za-z0-9])[A-Za-z0-9_.-]{0,40}"
      r"(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|"
      r"auth[_-]?token|client[_-]?secret|private[_-]?key)"
-     r"[A-Za-z0-9_.-]{0,40}\s*[:=]\s*"
-     r"['\"]?([^\s'\"]{6,})['\"]?"),
+     # `:-` is never an assignment: it is shell parameter expansion, and it put
+     # the inner half of `${PUBLIC_API_KEY:-${FALLBACK:-}}` through as a value
+     # even once the whole form was recognised as a placeholder. A separating
+     # space is unaffected (`password: -x` still matches).
+     r"[A-Za-z0-9_.-]{0,40}\s*(?::(?!-)|=)\s*"
+     # `<...>` and `$(...)` get their own alternatives because they may contain
+     # spaces: the general branch stops at the first one, so `<staging token>`
+     # and `$(docker ... printenv TOKEN)` would reach the filter below as
+     # `<staging` and `$(docker` -- no longer the placeholders they plainly are.
+     r"['\"]?(<[^>]*>|\$\([^)]*\)|\([^)\s]*\s[^)]*\)|[^\s'\"]{6,})['\"]?"),
 ]
 RULES = [(name, re.compile(pat)) for name, pat in _RULES]
 
 # Values that look like secrets but are obviously placeholders -- never flag.
+# This filter, not the keyword match, is what decides the rule's precision: on a
+# real 774-file store every single finding came from the assignment rule, and
+# every one was something below that the filter failed to recognise.
 _PLACEHOLDER = re.compile(
-    r"^(?:x{3,}|\.{3,}|\*{3,}|<[^>]+>|\$\{?[a-z_]+\}?|%[a-z_]+%|"
-    r"your[_-].*|my[_-].*|some[_-].*|example.*|sample.*|dummy.*|test[_-].*|"
-    r"changeme|placeholder|redacted|fake.*|none|null|true|false|"
-    r"pass|passwd|password|pwd|secret|user|username|admin|host|hostname)$",
+    r"^(?:"
+    r"x{3,}|\.{3,}|\*{3,}|<[^>]+>|"
+    # Interpolation and command substitution, as actually written in shell:
+    # `${VAR}` was covered, `${VAR:-default}`, `${A:-${B:-}}` and `$(cmd arg)`
+    # were not -- and a learning quotes the latter far more often.
+    r"\$\{.*\}|\$\([^)]*\)|\$[a-z0-9_]+|%[a-z0-9_]+%|"
+    # A parenthesised expression with a space in it is code, not a literal --
+    # PowerShell's `(Get-Content .env.local | ...)`. The space is required, so
+    # `(foobar)` stays a finding.
+    r"\([^)]*\s[^)]*\)|"
+    r"your[_-].*|my[_-].*|some[_-].*|example.*|sample.*|dummy.*|fake.*|"
+    # Values that announce they are not real, matched at either end: the
+    # spellings that occur are `local-test` and `...-token-change-if-shared`,
+    # never a bare `test` or `changeme`. A separator is required, so a word
+    # that is merely a substring of a real value (`Testable8f7d6s5a4`) is
+    # still a finding -- the same reason the line above spells `test[_-]`.
+    r"(?:test|local|localhost|dev|staging)(?:[_.:-][a-z0-9_.:+-]*)?|"
+    r"[a-z0-9_.:-]*[_.-](?:example|sample|dummy|fake|test|local|dev|staging)|"
+    r"[a-z0-9_.-]*change[_-]?(?:me|it|if|this|before)[a-z0-9_.-]*|"
+    r"changeme|placeholder|redacted|none|null|true|false|"
+    r"pass|passwd|password|pwd|secret|user|username|admin|host|hostname"
+    r")$",
     re.I,
 )
+# Punctuation that wraps a value without belonging to it. The store is Markdown,
+# so the value group swallows the closing backtick of `inline code` and the
+# sentence's own period: `import_secrets=False`). arrives as "False`)." and no
+# anchored pattern above can match it. `>` is deliberately absent -- stripping it
+# would break `<your-key>`.
+_WRAP_HEAD = "'\"`"
+_WRAP_TAIL = "'\"`)]},.;:!?"
 ALLOW_INLINE = "lore:allow-secret"
+
+
+def _unwrapped(val):
+    """`val` and every progressively-unwrapped form of it, outermost first.
+
+    One fully-stripped string cannot serve every value, because the same
+    character is wrapper punctuation in one and the value itself in another:
+    `${MY_KEY}`. needs its closing brace kept and its backtick dropped, while
+    `import_secrets=False`). needs both dropped, and `....` needs nothing
+    dropped at all. So trim one character at a time and let the caller test
+    every form -- unwrapping can only add a chance to match, never remove one.
+    """
+    forms, cur = [val], val
+    while cur:
+        if cur[-1] in _WRAP_TAIL:
+            cur = cur[:-1].strip()
+        elif cur[0] in _WRAP_HEAD:
+            cur = cur[1:].strip()
+        else:
+            break
+        if cur and cur not in forms:
+            forms.append(cur)
+    return forms
 
 
 def _redact(s):
@@ -88,8 +147,8 @@ def _redact(s):
 def _is_placeholder(match):
     # Rules with a capture group expose the value (assignment, URL password);
     # for the rest, judge the whole match.
-    val = (match.group(1) if match.lastindex else match.group(0)).strip().strip("'\"")
-    return bool(_PLACEHOLDER.match(val))
+    raw = (match.group(1) if match.lastindex else match.group(0)).strip()
+    return any(_PLACEHOLDER.match(v) for v in _unwrapped(raw))
 
 
 def scan_file(path, allow_res):

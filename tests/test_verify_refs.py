@@ -756,5 +756,93 @@ class TestGitDrift(unittest.TestCase):
         self.assertTrue(all(d is not None for d in got.values()))
 
 
+@unittest.skipUnless(GIT, "git not available")
+class TestHookWarning(unittest.TestCase):
+    """An uninstalled pre-push hook cannot report that it is uninstalled."""
+
+    def _project(self, store=None):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        subprocess.run([GIT, "-C", str(proj), "init", "-q"],
+                       check=True, capture_output=True)
+        if store:
+            write_entry(proj / store, "ci/a.md", title="A learning")
+        return proj
+
+    def _warn(self, proj):
+        return verify_refs.hook_warning(proj, dict(DEFAULTS,
+                                                   storeDir="learnings"))
+
+    def _install(self, proj, body):
+        hooks = proj / ".git" / "hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        (hooks / "pre-push").write_text(body, encoding="utf-8")
+
+    _LORE_HOOK = "#!/bin/sh\npython .lore/scan_secrets.py --quiet || exit 1\n"
+
+    def test_no_team_store_is_silent(self):
+        # A personal-store-only project publishes nothing: nothing to guard,
+        # and this repo is one of them.
+        self.assertIsNone(self._warn(self._project()))
+
+    def test_missing_hook_is_flagged(self):
+        self.assertIn("no pre-push hook",
+                      self._warn(self._project("learnings")) or "")
+
+    def test_hook_owned_by_another_tool_is_flagged(self):
+        # /lore:init never overwrites a hook it did not write, so this is the
+        # state a project lands in by having any other pre-push hook first.
+        proj = self._project("learnings")
+        self._install(proj, "#!/bin/sh\nexec ruff check\n")
+        self.assertIn("does not run the secret scan", self._warn(proj) or "")
+
+    def test_hook_without_its_scanner_is_flagged(self):
+        proj = self._project("learnings")
+        self._install(proj, self._LORE_HOOK)
+        self.assertIn("every push skips the scan", self._warn(proj) or "")
+
+    def test_installed_and_wired_is_silent(self):
+        proj = self._project("learnings")
+        self._install(proj, self._LORE_HOOK)
+        (proj / ".lore").mkdir()
+        (proj / ".lore" / "scan_secrets.py").write_text("", encoding="utf-8")
+        self.assertIsNone(self._warn(proj))
+
+    def test_ci_workflow_silences_it(self):
+        # CI covers teammates who never ran /lore:init, which is the stronger
+        # guarantee -- nagging about the local hook on top of it is noise.
+        proj = self._project("learnings")
+        wf = proj / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "lore.yml").write_text("- run: python .lore/scan_secrets.py\n",
+                                     encoding="utf-8")
+        self.assertIsNone(self._warn(proj))
+
+    def test_custom_hookspath_says_where_to_add_it(self):
+        proj = self._project("learnings")
+        subprocess.run([GIT, "-C", str(proj), "config", "core.hooksPath",
+                        ".githooks"], check=True, capture_output=True)
+        self.assertIn("core.hooksPath", self._warn(proj) or "")
+
+    def test_worktree_reads_the_shared_hooks(self):
+        # .git/hooks is shared by every linked worktree, so a worktree must not
+        # report "no hook installed" while the main checkout has one.
+        proj = self._project("learnings")
+        self._install(proj, self._LORE_HOOK)
+        (proj / ".lore").mkdir()
+        (proj / ".lore" / "scan_secrets.py").write_text("", encoding="utf-8")
+        for args in (["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"],
+                     ["-c", "user.email=t@t", "-c", "user.name=t",
+                      "commit", "-q", "-m", "c0"]):
+            subprocess.run([GIT, "-C", str(proj), *args],
+                           check=True, capture_output=True)
+        wt = proj.parent / "wt"
+        subprocess.run([GIT, "-C", str(proj), "worktree", "add", "-q",
+                        str(wt), "-b", "wt"], check=True, capture_output=True)
+        self.addCleanup(shutil.rmtree, wt, ignore_errors=True)
+        self.assertIsNone(self._warn(wt))
+
+
 if __name__ == "__main__":
     unittest.main()

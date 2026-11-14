@@ -175,6 +175,63 @@ def personal_store_warning(project, cfg):
     return None
 
 
+def hook_warning(project, cfg):
+    """Warn when nothing scans the store for secrets before a push, or None.
+
+    The team store is committed and pushed by default and capture is autonomous,
+    so the pre-push scan is the last thing between a learning and a published
+    credential -- and it is the easiest guard in the set to simply not have.
+    `/lore:init` deliberately refuses to overwrite an existing `pre-push`, and a
+    repo with a custom `core.hooksPath` never gets one at all: in both cases the
+    user is told once, at init time, and nothing ever says so again. The hook
+    itself cannot report this -- an uninstalled hook does not run.
+
+    Silent when there is no team store (nothing published to protect) or when a
+    workflow already runs the scan at the PR boundary, which covers teammates
+    too and is the stronger guarantee.
+    """
+    project = Path(project)
+    if not (project / cfg["storeDir"]).is_dir():
+        return None
+    for wf in sorted((project / ".github" / "workflows").glob("*.y*ml")):
+        try:
+            if "scan_secrets" in wf.read_text(encoding="utf-8", errors="replace"):
+                return None
+        except OSError:
+            continue
+    # The common dir, not the worktree's private one: every linked worktree
+    # shares the main checkout's hooks, so a worktree must not report "no hook".
+    _git_dir, common = git_dirs(project)
+    if common is None:
+        return None  # not a git repository: no hooks to have
+    try:
+        hooks_path = subprocess.run(
+            ["git", "-C", str(project), "config", "--get", "core.hooksPath"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if hooks_path.stdout.strip():
+        return ("note: core.hooksPath is set, so /lore:init could not install "
+                "the pre-push secret scan -- add `python .lore/scan_secrets.py "
+                "--quiet || exit 1` to your own pre-push hook.")
+    hook = common / "hooks" / "pre-push"
+    if not hook.is_file():
+        return ("warning: no pre-push hook -- nothing scans the store for "
+                "secrets before it is published. Run /lore:init to install it.")
+    try:
+        installed = hook.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "scan_secrets" not in installed:
+        return ("warning: a pre-push hook exists but does not run the secret "
+                "scan -- /lore:init never overwrites one it did not write. Add "
+                "`python .lore/scan_secrets.py --quiet || exit 1` to it.")
+    if not (project / ".lore" / "scan_secrets.py").is_file():
+        return ("warning: the pre-push hook runs .lore/scan_secrets.py, which "
+                "is missing -- every push skips the scan. Re-run /lore:init.")
+    return None
+
+
 # --- default mode: file-ref existence + frontmatter value check --------------
 
 def _value_problems(e, cfg):
@@ -354,7 +411,8 @@ def cmd_check(entries, project, cfg, strict, consolidated=()):
                 missing_refs = True
     cons_issues = consolidation_issues(project, cfg, entries, consolidated)
     notes = [n for n in (config_warning(project), version_warning(project),
-                         personal_store_warning(project, cfg)) if n]
+                         personal_store_warning(project, cfg),
+                         hook_warning(project, cfg)) if n]
     if not issues and not any(cons_issues):
         if entries or consolidated:
             # Name what was examined: with a consolidated layer, "all entries
@@ -817,7 +875,8 @@ def cmd_stats(entries, project, cfg, store, consolidated=()):
     print(f"  near-duplicate pairs (title/tag overlap): {dupes}{tail}")
     print(f"  links: dangling [[refs]] (soft; forward-refs ok): {len(dangling)}")
     for n in (config_warning(project), version_warning(project),
-              personal_store_warning(project, cfg)):
+              personal_store_warning(project, cfg),
+              hook_warning(project, cfg)):
         if n:
             print(f"\n  {n}")
     return 0

@@ -56,6 +56,68 @@ class TestScanFile(unittest.TestCase):
         self.assertEqual(_scan("password: x"), [])
         self.assertEqual(_scan("secret_name = db"), [])
 
+    def test_markdown_punctuation_does_not_defeat_the_filter(self):
+        # The store is Markdown, so the closing backtick of `inline code` and
+        # the sentence's own period land inside the captured value: the filter
+        # has to see "False", not "False`).".
+        self.assertEqual(_scan("`import_secrets=False`)."), [])
+        self.assertEqual(_scan("set `api_key=${MY_KEY}`."), [])
+        self.assertEqual(_scan('(password = "changeme"),'), [])
+
+    def test_interpolation_and_substitution_not_flagged(self):
+        # Only the bare `${VAR}` form used to be recognised; a learning quotes
+        # the others far more often than it quotes a literal.
+        for line in ("api_key=${MY_KEY:-${OTHER:-}}",
+                     "api_key=$(docker exec dir printenv ADMIN_TOKEN)",
+                     "export API_KEY=$(grep API_KEY .env.local | cut -d= -f2)",
+                     "$env:API_KEY = (Get-Content .env.local | Select-String k)",
+                     "api_key=$MY_KEY",
+                     "api_key=%MY_KEY%",
+                     "API_SECRET='<the real token>'",
+                     # the inner half of an expansion, reached through its `:-`
+                     "`${PUBLIC_API_KEY:-${FALLBACK:-}}` also matters because"):
+            with self.subTest(line=line):
+                self.assertEqual(_scan(line), [])
+
+    def test_self_labelled_dev_values_not_flagged(self):
+        # The placeholder words were prefix-anchored, so the spellings that
+        # actually occur -- a committed local default, not a bare `changeme` --
+        # all came out as findings.
+        for line in ("SESSION_SECRET=local-test",
+                     "api_key=acme-local-admin-token-change-if-shared",
+                     "password=dev-only-not-real",
+                     "client_secret: staging-value-here",
+                     "password = localhost:5432"):
+            with self.subTest(line=line):
+                self.assertEqual(_scan(line), [])
+
+    def test_punctuation_only_placeholders_still_filtered(self):
+        # Unwrapping must not strip the value away: `....` and `****` are
+        # placeholders in their own right, so the raw value is tried too.
+        self.assertEqual(_scan('password = "...."'), [])
+        self.assertEqual(_scan("password = ****"), [])
+
+    def test_widened_filter_keeps_its_false_negatives_out(self):
+        # Every change above SUPPRESSES findings, so this is the direction that
+        # needs a guard: a self-labelling word only disarms the value when it is
+        # a whole segment of it, and a bracketed value is only code when it
+        # contains a space.
+        for line in ("api_key=Local7fGh5678Ab",
+                     "api_key = (h8s7d6f5g4h3j2k1)",
+                     'password = "Changed8f7d6s5a4"',
+                     'api_key = "Testable8f7d6s5a4"',
+                     "password: -h8s7d6f5g4h3j2k1",
+                     "api_key=Devi0us7fGh5678Ab"):
+            with self.subTest(line=line):
+                self.assertEqual(len(_scan(line)), 1, line)
+
+    def test_vendor_rules_unaffected_by_unwrapping(self):
+        # `_is_placeholder` judges group(0) for the rules with no capture group,
+        # so the unwrapping runs on their matches too.
+        fake = "AKIA" + "G" * 16
+        self.assertEqual([f[1] for f in _scan(f"`{fake}`.")],
+                         ["AWS access key id"])
+
     def test_inline_allow(self):
         fake = "AKIA" + "C" * 16
         self.assertEqual(_scan(f"{fake}  lore:allow-secret"), [])
