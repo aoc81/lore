@@ -111,6 +111,44 @@ class TestScanFile(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertEqual(len(_scan(line)), 1, line)
 
+    def test_a_label_does_not_disarm_a_credential_shaped_value(self):
+        # 0.7.6 let a self-labelling word at either end disarm whatever it was
+        # attached to. A staging credential is still a credential: the label
+        # only counts when the rest of the value is plain lower-case words.
+        for line in ("password=Hunter2-staging",
+                     "DB_PASSWORD=Xk9fj3kd0s-dev",
+                     "api_key=dev-8f7d6s5a4kd93jf7s6d5",
+                     "api_key=staging-8f7d6s5a4kd93jf7s6d5",
+                     "api_key=local-8f7d6s5a4kd93jf7s6d5",
+                     "password=8f7d6s5a4kd93jf.local",
+                     "password=HunterTwo-staging",
+                     "password=$up3rs3cret99",
+                     "client_secret=stockexchangeit2024",
+                     "password = (hunter2 is the real one)"):
+            with self.subTest(line=line):
+                self.assertEqual(len(_scan(line)), 1, line)
+
+    def test_word_only_labelled_values_not_flagged(self):
+        for line in ("password=postgres_dev",
+                     "password=db.internal.local",
+                     "api_key=$API_KEY2",
+                     "client_secret=CHANGE_ME"):
+            with self.subTest(line=line):
+                self.assertEqual(_scan(line), [])
+
+    def test_nothing_0_7_5_filtered_became_a_finding(self):
+        # A precision fix may only ADD suppression. `test[_-].*` was dropped in
+        # the 0.7.6 rewrite, and the bracket alternatives matched lines the
+        # general branch never had (`<>` is too short for it; so is `(ask`).
+        for line in ("password=test_p@ss/w0rd=",
+                     "api_key=test-8f7d6s5a4kd93jf7s6d5",
+                     "if password = <> then",
+                     "secret: <>",
+                     "Password: (ask Will)",
+                     "token_secret = ()"):
+            with self.subTest(line=line):
+                self.assertEqual(_scan(line), [])
+
     def test_vendor_rules_unaffected_by_unwrapping(self):
         # `_is_placeholder` judges group(0) for the rules with no capture group,
         # so the unwrapping runs on their matches too.

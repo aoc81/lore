@@ -825,6 +825,67 @@ class TestHookWarning(unittest.TestCase):
                         ".githooks"], check=True, capture_output=True)
         self.assertIn("core.hooksPath", self._warn(proj) or "")
 
+    # --- the advised end state: do what the message says, and it must stop ---
+
+    def _wired_project(self):
+        proj = self._project("learnings")
+        (proj / ".lore").mkdir()
+        (proj / ".lore" / "scan_secrets.py").write_text("", encoding="utf-8")
+        return proj
+
+    def test_custom_hookspath_with_the_scan_added_is_silent(self):
+        proj = self._wired_project()
+        subprocess.run([GIT, "-C", str(proj), "config", "core.hooksPath",
+                        ".githooks"], check=True, capture_output=True)
+        (proj / ".githooks").mkdir()
+        (proj / ".githooks" / "pre-push").write_text(self._LORE_HOOK,
+                                                     encoding="utf-8")
+        self.assertIsNone(self._warn(proj))
+
+    def test_custom_hookspath_still_reports_a_missing_scanner(self):
+        # Following the hooksPath must not skip the last check on the way.
+        proj = self._project("learnings")
+        subprocess.run([GIT, "-C", str(proj), "config", "core.hooksPath",
+                        ".githooks"], check=True, capture_output=True)
+        (proj / ".githooks").mkdir()
+        (proj / ".githooks" / "pre-push").write_text(self._LORE_HOOK,
+                                                     encoding="utf-8")
+        self.assertIn("every push skips the scan", self._warn(proj) or "")
+
+    def test_scan_wired_through_a_hook_manager_is_silent(self):
+        # The hook file is a shim; the commands live in the manager's config.
+        shim = "#!/bin/sh\nexec manager run pre-push \"$@\"\n"
+        for rel in (".pre-commit-config.yaml", "lefthook.yml"):
+            with self.subTest(manager=rel):
+                proj = self._wired_project()
+                self._install(proj, shim)
+                (proj / rel).write_text(
+                    "entry: python .lore/scan_secrets.py --quiet\n",
+                    encoding="utf-8")
+                self.assertIsNone(self._warn(proj))
+
+    def test_husky_shim_dir_reads_the_users_own_hook(self):
+        # husky 9: core.hooksPath is `.husky/_`, whose pre-push only dispatches
+        # to `.husky/pre-push` -- the file the user actually edits.
+        proj = self._wired_project()
+        subprocess.run([GIT, "-C", str(proj), "config", "core.hooksPath",
+                        ".husky/_"], check=True, capture_output=True)
+        (proj / ".husky" / "_").mkdir(parents=True)
+        (proj / ".husky" / "_" / "pre-push").write_text(
+            '#!/bin/sh\n. "$(dirname "$0")/h"\n', encoding="utf-8")
+        self.assertIn("core.hooksPath", self._warn(proj) or "")
+        (proj / ".husky" / "pre-push").write_text(self._LORE_HOOK,
+                                                  encoding="utf-8")
+        self.assertIsNone(self._warn(proj))
+
+    def test_manager_config_without_any_hook_is_still_flagged(self):
+        # The config is committed but the shim is per-clone: with no hook to
+        # dispatch to it, nothing runs, so the config alone proves nothing.
+        proj = self._wired_project()
+        (proj / ".pre-commit-config.yaml").write_text(
+            "entry: python .lore/scan_secrets.py --quiet\n", encoding="utf-8")
+        self.assertIn("no pre-push hook", self._warn(proj) or "")
+
     def test_worktree_reads_the_shared_hooks(self):
         # .git/hooks is shared by every linked worktree, so a worktree must not
         # report "no hook installed" while the main checkout has one.

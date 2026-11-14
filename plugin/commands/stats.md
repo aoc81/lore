@@ -44,11 +44,14 @@ After running, call out anything worth acting on and suggest the next step:
 - a **version note** at the bottom → the `.lore/` pre-push hook copies are from an
   older plugin; re-run `/lore:init` to refresh them.
 - a **hook warning** at the bottom → nothing scans the store for secrets before a
-  push on this machine: no `pre-push` hook, one owned by another tool (`/lore:init`
-  never overwrites one it didn't write), a custom `core.hooksPath`, or the hook's
-  `.lore/scan_secrets.py` gone missing. An uninstalled hook can't report itself, so
-  this is the only place it shows. Silent when a workflow runs the scan in CI, which
-  covers teammates too, or when the project has no team store to publish.
+  push on this machine: no `pre-push` hook, one that does not run the scan (`/lore:init`
+  never overwrites one it didn't write, and never installs into a custom
+  `core.hooksPath`), or the hook's `.lore/scan_secrets.py` gone missing. An uninstalled
+  hook can't report itself, so this is the only place it shows. It stops once
+  `python .lore/scan_secrets.py --quiet || exit 1` is in the hook that runs — or in the
+  pre-push stage of husky, pre-commit or lefthook when the hook is their shim. Also
+  silent when a workflow runs the scan in CI, which covers teammates too, or when the
+  project has no team store to publish.
 
 The dangling-`[[link]]` count is **soft**: a link to a not-yet-written learning
 is an allowed forward-reference, not an error.
