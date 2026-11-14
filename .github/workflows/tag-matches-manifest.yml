@@ -18,20 +18,30 @@ on:
 permissions:
   contents: read
 
+# The two assertions below are independent of each other and both depend only on
+# the checkout, which is what their `if:` says. Steps in sequence would encode
+# "and then": a job stops at its first failing step, so the version check failing
+# would hide the ancestry check entirely — you would fix one problem, re-tag, and
+# only then hear about the other. Worse, whichever check came second could never
+# be reached by a smoke tag that trips the first, so its behaviour in the runner
+# would stay unverified however carefully it was tested.
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        id: checkout
         with:
           fetch-depth: 0 # the ancestry check below needs main's history
 
       - name: Both manifests declare the tag's own version
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
           TAG: ${{ github.ref_name }}
         run: python .github/check_tag_version.py
 
       - name: The tag is reachable from main
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: |
           set -eu
           # ^{commit} because an annotated tag's ref resolves to the tag object.
@@ -39,9 +49,10 @@ jobs:
           git fetch --quiet origin main
           if ! git merge-base --is-ancestor "$commit" origin/main; then
             echo "::error::${GITHUB_REF_NAME} ($commit) is not an ancestor of" \
-                 "main. A commit on a branch whose PR already merged lands" \
-                 "nowhere, and tagging it would publish a tree main does not" \
-                 "have. Land the commit on main first, then re-tag."
+                 "main, so tagging it would publish a tree main does not have." \
+                 "Either it is still on a feature branch, or it is on a branch" \
+                 "whose PR already merged — that branch still accepts pushes," \
+                 "and they land nowhere. Land the commit on main, then re-tag."
             exit 1
           fi
           echo "OK  ${GITHUB_REF_NAME} ($commit) is on main."
