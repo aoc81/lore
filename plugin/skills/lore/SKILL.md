@@ -96,7 +96,7 @@ doesn't belong in the store.
    ```sh
    PY=$(command -v python3 || command -v python || command -v py)
    R="${CLAUDE_PLUGIN_ROOT}/scripts/recall.py"
-   [ -f "$R" ] || R="$HOME/.codex/lore/recall.py"   # Codex install location
+   [ -f "$R" ] || R="${CODEX_HOME:-$HOME/.codex}/lore/recall.py"   # Codex install location
    "$PY" "$R" --query "<draft title + tags>"
    ```
    It lists the top existing entries by the same scorer the recall hook uses.
@@ -114,13 +114,19 @@ doesn't belong in the store.
    ```sh
    PY=$(command -v python3 || command -v python || command -v py)
    S="${CLAUDE_PLUGIN_ROOT}/scripts/scan_secrets.py"
-   [ -f "$S" ] || S="$HOME/.codex/lore/scan_secrets.py"   # Codex install location
+   [ -f "$S" ] || S="${CODEX_HOME:-$HOME/.codex}/lore/scan_secrets.py"   # Codex install location
    "$PY" "$S" <path-to-the-file-you-wrote>
    ```
    If it flags anything, fix the entry **before ending the turn** (reference the
    secret, never quote it). The pre-push hook is the backstop, not the plan.
-5. **Refresh the index** — run `/lore:lint --index` so the store README lists it
-   (team store only; the personal store has no generated index).
+5. **Refresh the index** — so the store README lists it (team store only; the
+   personal store has no generated index):
+   ```sh
+   PY=$(command -v python3 || command -v python || command -v py)
+   V="${CLAUDE_PLUGIN_ROOT}/scripts/verify_refs.py"
+   [ -f "$V" ] || V="${CODEX_HOME:-$HOME/.codex}/lore/verify_refs.py"   # Codex install location
+   "$PY" "$V" --index
+   ```
 
 `storeDir` defaults to `learnings/` (override in `.lore.json`). `category` is
 free-form — reuse an existing folder name when one fits, otherwise add one.

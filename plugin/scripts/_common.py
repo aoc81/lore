@@ -28,6 +28,44 @@ DEFAULTS = {
 
 _NUDGE_MODES = ("always", "smart", "off")
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# What a Codex user runs instead of each /lore:init step. Codex has no slash
+# commands; the installer lives in their clone of the Lore repo.
+_CODEX_INSTALL = "python3 <lore-repo>/codex/install.py"
+
+
+def host(script_dir=SCRIPT_DIR):
+    """Which install these scripts run from: "claude", "codex", or None.
+
+    The Claude plugin keeps its manifest one level up; the Codex installer
+    stamps a VERSION file next to the scripts. A project's `.lore/` copies (run
+    by the pre-push hook and CI) carry a VERSION too but belong to neither host,
+    since either may have written them.
+    """
+    script_dir = Path(script_dir)
+    if (script_dir.parent / ".claude-plugin" / "plugin.json").is_file():
+        return "claude"
+    if script_dir.name != ".lore" and (script_dir / "VERSION").is_file():
+        return "codex"
+    return None
+
+
+def setup_cmd(codex_flag, script_dir=SCRIPT_DIR):
+    """The setup command to name in a message, for the host that is running.
+
+    Pointing a Codex user at `/lore:init` names a command that does not exist
+    there, so a message that tells the user what to run asks this instead.
+    """
+    claude = "/lore:init"
+    codex = f"`{_CODEX_INSTALL} {codex_flag}`"
+    which = host(script_dir)
+    if which == "claude":
+        return claude
+    if which == "codex":
+        return codex
+    return f"{claude} (Claude Code) or {codex} (Codex)"
+
 # One month of the freshness threshold, in days (365.25 / 12): 6mo -> 183d, the
 # value verify_refs.py used to hardcode.
 _DAYS_PER_MONTH = 30.44

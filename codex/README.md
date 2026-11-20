@@ -21,11 +21,15 @@ it's a missing tool rather than a missing hook: see
 | Edit-time recall (`PreToolUse`) | `PreToolUse` hook, matcher `apply_patch\|Edit\|Write` → `additionalContext` | Codex reports every edit as **`apply_patch`** with the patch text in `tool_input.command` (no `file_path`), so `recall.py` reads the targets out of the `*** Update File:` headers — one patch can surface learnings for several files at once. |
 | Post-compaction reminder (`SessionStart`) | `SessionStart` hook, matcher `compact` → `additionalContext` | Same event, same matcher, same payload as the Claude target. |
 | Capture nudge (`Stop`) | `Stop` hook → `{"decision":"block","reason":...}` | Codex pushes the reminder as a continuation prompt; `capture_check.py` emits this on stdout — the same object Claude Code now uses. Guarded by `stop_hook_active` (no loop). |
-| Capture guidance (skill) | Agent Skill (`SKILL.md`) | Installed to `~/.agents/skills/lore/`. |
-| Freshness linter | `verify_refs.py` | Run directly: `python3 ~/.codex/lore/verify_refs.py [--report\|--stats\|--dupes\|--index\|--strict]`. |
-| Cold-start mining | `mine_history.py` | Run directly: `python3 ~/.codex/lore/mine_history.py [--since …]`, then write the entries via the skill (the Claude target wraps this as `/lore:mine`). |
-| Consolidation | `consolidate.py` | Run directly: `python3 ~/.codex/lore/consolidate.py [--plan\|--snapshot FILE\|--compare FILE\|--mark SKILL ENTRY…\|--prune\|--log TEXT]`. The deterministic half of the Claude target's `/lore:consolidate`: grouping and writing the summaries is the agent's job, and on Codex you drive the steps yourself (there is no slash command). Recall reads the resulting skills through `consolidatedDirs`, on both targets. |
-| Secret scan | `scan_secrets.py` | Run directly: `python3 ~/.codex/lore/scan_secrets.py` before sharing the store; `--ci` installs the same check as a PR gate. |
+| Capture guidance (skill, `/lore:capture`) | Agent Skill (`SKILL.md`) | Installed to `~/.agents/skills/lore/`. |
+| Freshness linter (`/lore:lint`) | `verify_refs.py` | Run directly: `python3 ~/.codex/lore/verify_refs.py [--report\|--stats\|--dupes\|--index\|--strict]`. |
+| Cold-start mining (`/lore:mine`) | `mine_history.py` | Run directly: `python3 ~/.codex/lore/mine_history.py [--since …]`, then write the entries via the skill (the Claude target wraps this as `/lore:mine`). |
+| Consolidation (`/lore:consolidate`) | `consolidate.py` | Run directly: `python3 ~/.codex/lore/consolidate.py [--plan\|--snapshot FILE\|--compare FILE\|--mark SKILL ENTRY…\|--prune\|--log TEXT]`. The deterministic half of the Claude target's `/lore:consolidate`: grouping and writing the summaries is the agent's job, and on Codex you drive the steps yourself (there is no slash command). Recall reads the resulting skills through `consolidatedDirs`, on both targets. |
+| Secret scan (`/lore:scan`) | `scan_secrets.py` | Run directly: `python3 ~/.codex/lore/scan_secrets.py` before sharing the store; `install.py --hook` runs it before every push, `--ci` as a PR gate. |
+| Search (`/lore:search`) | `recall.py --query` | Run directly: `python3 ~/.codex/lore/recall.py --query "<what you're looking for>"` -- the same scorer the recall hook uses. |
+| Health snapshot (`/lore:stats`) | `verify_refs.py --stats` | Run directly: `python3 ~/.codex/lore/verify_refs.py --stats`. Reads are not tracked on Codex (see [Caveats](#caveats--differences-from-claude-code)). |
+| Semantic re-verify (`/lore:sweep`) | `verify_refs.py --report` + the agent | Ask Codex to follow [plugin/commands/sweep.md](../plugin/commands/sweep.md): take the `--report` worklist, read each entry against the code, then bump `verified:`, fix `files:`, or mark it `superseded`. |
+| Setup (`/lore:init`) | `install.py --store` / `--hook` / `--ci` | Store scaffold, pre-push secret scan, CI guard — see [Install](#install). |
 | Store | `learnings/` markdown | Per-project, tool-agnostic — created on first capture or via `--store`. Plus the optional private `personalStoreDir`, read by recall the same way. |
 
 ## Install
@@ -54,6 +58,17 @@ Per project, scaffold a store (optional — it's also created on first capture):
 ```sh
 python3 codex/install.py --store      # creates ./learnings with a template + example
 ```
+
+Per repo, install the pre-push secret scan (recommended — the store is pushed by
+default, and this is what stops a captured secret from being published):
+
+```sh
+python3 codex/install.py --hook       # .lore/ script copies + .git/hooks/pre-push
+```
+
+Like `/lore:init`, it never overwrites a `pre-push` hook Lore didn't write and never
+writes into a custom `core.hooksPath`; it prints the one line to add instead. Re-run
+it after upgrading Lore: `verify_refs.py` warns when the `.lore/` copies fall behind.
 
 Per repo, add the team-wide CI guard (optional but recommended for a shared store —
 a git hook only protects the machine it's on):
@@ -100,9 +115,10 @@ Uninstall: `python3 codex/install.py --uninstall` (leaves your stores and the
   an MCP server — so there is no reliable event to attribute a store read to, and
   stats on Codex reports surfacings only. Everything else is at parity.
 - **No `/lore:*` slash commands.** Codex custom prompts are user-local and can't be
-  namespaced/shared, so the Claude commands map to: install script (`init`), the
-  `lore` skill + Stop hook (`capture`), and direct `verify_refs.py` /
-  `mine_history.py` / `consolidate.py` calls (`lint`, `mine`, `consolidate`).
+  namespaced/shared, so the Claude commands map to: install script (`init` =
+  `--store` + `--hook` + `--ci`), the `lore` skill + Stop hook (`capture`), and
+  direct script calls for the rest — the table [above](#why-it-ports-cleanly)
+  covers every command.
   For `consolidate`, follow the steps in
   [plugin/commands/consolidate.md](../plugin/commands/consolidate.md) by hand --
   above all `--snapshot` before and `--compare` after, which is what proves the

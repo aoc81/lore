@@ -136,14 +136,16 @@ class TestSkillFindsItsScripts(unittest.TestCase):
     has the scripts installed under ~/.codex/lore.
     """
 
-    def _resolve(self, var, lines, home, substitute):
+    def _resolve(self, var, lines, home, substitute, codex_home=None):
         script = "\n".join(lines)
         if substitute:
             script = script.replace("${CLAUDE_PLUGIN_ROOT}",
                                     (ROOT / "plugin").as_posix())
         env = {k: v for k, v in os.environ.items()
-               if k != "CLAUDE_PLUGIN_ROOT"}
+               if k not in ("CLAUDE_PLUGIN_ROOT", "CODEX_HOME")}
         env["HOME"] = home
+        if codex_home:
+            env["CODEX_HOME"] = codex_home
         out = subprocess.run([SH, "-c", f'{script}\nprintf %s "${var}"'],
                              cwd=home, env=env, capture_output=True,
                              text=True)
@@ -151,7 +153,18 @@ class TestSkillFindsItsScripts(unittest.TestCase):
 
     def test_both_snippets_are_found(self):
         scripts = sorted(s for _v, s, _l in _skill_locators())
-        self.assertEqual(scripts, ["recall.py", "scan_secrets.py"])
+        # The index refresh is the third: it used to be a bare `/lore:lint`,
+        # a slash command Codex does not have.
+        self.assertEqual(scripts,
+                         ["recall.py", "scan_secrets.py", "verify_refs.py"])
+
+    def test_no_step_needs_a_slash_command(self):
+        # The skill is installed on Codex too, which has no /lore:* commands:
+        # every step it tells the agent to RUN has to be a script call. Naming
+        # a command the user may run (`/lore:capture`) is fine; telling the
+        # agent to run one is not.
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"\brun `/lore:\w+", text), [])
 
     def test_claude_code_uses_the_plugin_copy(self):
         for var, script, lines in _skill_locators():
@@ -171,6 +184,39 @@ class TestSkillFindsItsScripts(unittest.TestCase):
                 self.assertEqual(
                     self._resolve(var, lines, home, substitute=False),
                     installed.as_posix())
+
+    def test_codex_honors_codex_home(self):
+        # install.py installs under $CODEX_HOME when it is set; a skill that
+        # only looked in ~/.codex would find nothing there.
+        for var, script, lines in _skill_locators():
+            with self.subTest(script=script), \
+                    tempfile.TemporaryDirectory() as home:
+                codex_home = Path(home) / "elsewhere"
+                installed = codex_home / "lore" / script
+                installed.parent.mkdir(parents=True)
+                installed.write_text("", encoding="utf-8")
+                self.assertEqual(
+                    self._resolve(var, lines, home, substitute=False,
+                                  codex_home=codex_home.as_posix()),
+                    installed.as_posix())
+
+
+class TestCodexMapsEveryCommand(unittest.TestCase):
+    """Codex has no slash commands, so its README is the only map to them.
+
+    New commands have landed on the Claude target first; this keeps one from
+    shipping without saying what a Codex user does instead.
+    """
+
+    def test_every_command_is_mapped(self):
+        text = (ROOT / "codex" / "README.md").read_text(encoding="utf-8")
+        table = text.split("## Why it ports cleanly", 1)[1].split("\n## ", 1)[0]
+        commands = sorted(p.stem for p in
+                          (ROOT / "plugin" / "commands").glob("*.md"))
+        self.assertTrue(commands)
+        for name in commands:
+            with self.subTest(command=name):
+                self.assertIn(f"`/lore:{name}`", table)
 
 
 if __name__ == "__main__":

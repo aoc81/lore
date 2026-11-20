@@ -1,12 +1,13 @@
 #!/bin/sh
-# Lore pre-push hook installed by `/lore:init`. Two checks:
+# Lore pre-push hook installed by `/lore:init` (Claude Code) or
+# `codex/install.py --hook` (Codex). Two checks:
 #   1. Secret scan (BLOCKING) — the learnings store is committed and pushed by
 #      default and capture is autonomous, so a learning that quotes a real key
 #      would be published. If scan_secrets.py finds one, the push is aborted.
 #   2. Freshness (non-blocking) — warns if a learning references a now-missing
 #      file; never fails the push.
 #
-# /lore:init copies scan_secrets.py + verify_refs.py + _common.py into
+# The installer copies scan_secrets.py + verify_refs.py + _common.py into
 # <repo>/.lore/ so this hook stays self-contained (the plugin's own dir is an
 # ephemeral cache).
 #
@@ -23,7 +24,8 @@ if [ -z "$PY" ]; then
   echo "lore: no python on PATH — the secret scan did NOT run for this push." >&2
 elif [ ! -f "$root/.lore/scan_secrets.py" ]; then
   echo "lore: .lore/scan_secrets.py is missing — the secret scan did NOT run" >&2
-  echo "      for this push. Re-run /lore:init to restore it." >&2
+  echo "      for this push. Re-run /lore:init (Claude Code) or" >&2
+  echo "      codex/install.py --hook (Codex) to restore it." >&2
 elif ! "$PY" "$root/.lore/scan_secrets.py" --quiet; then
   if [ "$LORE_SCAN_BLOCK" = "0" ]; then
     echo "lore: secrets found but LORE_SCAN_BLOCK=0 — allowing push anyway." >&2
