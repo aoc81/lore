@@ -10,6 +10,7 @@ PreToolUse (edit-time recall), Stop (capture nudge), and SessionStart/compact
 
   python3 codex/install.py            # global install (once per machine)
   python3 codex/install.py --store    # scaffold a learnings/ store in THIS project
+  python3 codex/install.py --hook     # add the pre-push secret scan to THIS repo
   python3 codex/install.py --ci       # add the CI secret-scan guard to THIS repo
   python3 codex/install.py --uninstall
 
@@ -23,6 +24,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -33,6 +35,15 @@ SKILL_SRC = SRC / "skills" / "lore" / "SKILL.md"
 TEMPLATES = SRC / "templates"
 CORE = ["recall.py", "capture_check.py", "verify_refs.py", "scan_secrets.py",
         "mine_history.py", "consolidate.py", "_common.py"]
+
+
+def plugin_version():
+    try:
+        return json.loads(
+            (SRC / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        ).get("version", "")
+    except (OSError, ValueError):
+        return ""
 
 
 def codex_home():
@@ -140,6 +151,11 @@ def install():
     if tdst.exists():
         shutil.rmtree(tdst)
     shutil.copytree(TEMPLATES, tdst)
+    # The linter compares this stamp with a project's .lore/VERSION to say when
+    # those copies are stale -- and it is how the scripts know they run on Codex.
+    version = plugin_version()
+    if version:
+        (lore_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
     skill_dir = skills_root() / "lore"
     skill_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(SKILL_SRC, skill_dir / "SKILL.md")
@@ -162,8 +178,76 @@ def install():
     print("      trust is per-command, so re-approve after an upgrade).")
     print("  2. In a project:  python3 codex/install.py --store   (scaffold ./learnings)")
     print("     or just start working — the store is created on first capture.")
-    print("  3. Optional, per repo:  python3 codex/install.py --ci")
+    print("  3. Per repo:  python3 codex/install.py --hook")
+    print("     (pre-push secret scan, so a captured secret is never pushed)")
+    print("     and optionally  python3 codex/install.py --ci")
     print("     (commits the store's secret-scan guard as a GitHub Actions check)")
+    return 0
+
+
+def _copy_guard(root):
+    """Copy the guard scripts to <root>/.lore/ and stamp their version.
+
+    Both the pre-push hook and the CI workflow run these committed copies, so
+    they survive a Lore upgrade or uninstall; the stamp is what lets the linter
+    say when they have fallen behind.
+    """
+    lore_dir = root / ".lore"
+    lore_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("scan_secrets.py", "verify_refs.py", "_common.py"):
+        shutil.copy2(SCRIPTS / name, lore_dir / name)
+    version = plugin_version()
+    if version:
+        (lore_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
+    return lore_dir
+
+
+def _git(root, *args):
+    try:
+        out = subprocess.run(["git", "-C", str(root), *args],
+                             capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+_HOOK_SNIPPET = "python .lore/scan_secrets.py --quiet || exit 1"
+
+
+def install_hook(target):
+    """Install the pre-push secret scan in the repo at `target`.
+
+    The Codex equivalent of /lore:init's hook step, with the same rule: never
+    overwrite a pre-push hook Lore did not write, and never write into a custom
+    core.hooksPath -- both belong to someone else, so print the one line to add
+    instead.
+    """
+    top = _git(Path(target).resolve(), "rev-parse", "--show-toplevel")
+    if not top:
+        print(f"Not a git repository: {Path(target).resolve()}")
+        return 1
+    root = Path(top)
+    # Shared by every linked worktree, so the hook goes where all of them look.
+    common = _git(root, "rev-parse", "--git-common-dir")
+    lore_dir = _copy_guard(root)
+    print(f"Copied guard scripts to {lore_dir}")
+    custom = _git(root, "config", "--get", "core.hooksPath")
+    if custom:
+        print(f"core.hooksPath is set ({custom}), so no hook was installed.")
+        print(f"  Add this line to your own pre-push hook:  {_HOOK_SNIPPET}")
+        return 0
+    hook = (root / common).resolve() / "hooks" / "pre-push"
+    if hook.exists() and "scan_secrets" not in hook.read_text(
+            encoding="utf-8", errors="replace"):
+        print(f"A pre-push hook already exists, left untouched: {hook}")
+        print(f"  Add this line to it:  {_HOOK_SNIPPET}")
+        return 0
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(SCRIPTS / "pre-push", hook)
+    hook.chmod(0o755)
+    print(f"Installed pre-push hook: {hook}")
+    print("  It blocks a push when a learning quotes a likely secret.")
+    print("  Commit .lore/ if you also use --ci; re-run --hook after upgrading Lore.")
     return 0
 
 
@@ -176,18 +260,7 @@ def install_ci(target):
     drift apart. This is the Codex equivalent of what /lore:init offers.
     """
     root = Path(target).resolve()
-    lore_dir = root / ".lore"
-    lore_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("scan_secrets.py", "verify_refs.py", "_common.py"):
-        shutil.copy2(SCRIPTS / name, lore_dir / name)
-    try:
-        version = json.loads(
-            (SRC / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
-        ).get("version", "")
-    except (OSError, ValueError):
-        version = ""
-    if version:
-        (lore_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
+    lore_dir = _copy_guard(root)
     wf_dir = root / ".github" / "workflows"
     wf_dir.mkdir(parents=True, exist_ok=True)
     wf = wf_dir / "lore.yml"
@@ -249,6 +322,9 @@ def main():
     ap = argparse.ArgumentParser(description="Install Lore for OpenAI Codex.")
     ap.add_argument("--store", nargs="?", const=".", metavar="DIR",
                     help="scaffold a learnings/ store in DIR (default: current project)")
+    ap.add_argument("--hook", nargs="?", const=".", metavar="DIR",
+                    help="install the pre-push secret scan in the repo in DIR "
+                         "(.lore/ copies + .git/hooks/pre-push)")
     ap.add_argument("--ci", nargs="?", const=".", metavar="DIR",
                     help="add the CI secret-scan guard to the repo in DIR "
                          "(.lore/ copies + .github/workflows/lore.yml)")
@@ -258,6 +334,8 @@ def main():
         return uninstall()
     if args.store is not None:
         return scaffold_store(args.store)
+    if args.hook is not None:
+        return install_hook(args.hook)
     if args.ci is not None:
         return install_ci(args.ci)
     return install()

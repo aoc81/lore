@@ -49,8 +49,9 @@ from _common import (DEFAULTS, body_words, config_issues,  # noqa: E402
                      find_project_dir, git_dirs, host_unsafe_keys,
                      iter_consolidated, iter_entries, load_config, norm_rel,
                      personal_store, ref_exists, ref_matches, rel_path,
-                     resolve_consolidated, revisit_due, shell_safe,
-                     skill_body, stale_after_days, unsafe_effect, words)
+                     resolve_consolidated, revisit_due, setup_cmd, host,
+                     shell_safe, skill_body, stale_after_days, unsafe_effect,
+                     words)
 
 _DATE_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -81,12 +82,22 @@ def _parse_date(s):
 # --- .lore/ hook-copy version check ------------------------------------------
 
 def plugin_version():
-    """The plugin's own version, when running from the plugin tree (else None)."""
-    manifest = SCRIPT_DIR.parent / ".claude-plugin" / "plugin.json"
+    """The installed Lore version, or None when it cannot be told.
+
+    The Claude plugin reads its manifest; the Codex install has no manifest, so
+    its installer stamps a VERSION file next to the scripts. A `.lore/` copy
+    has neither host, so there is nothing to compare its own stamp against.
+    """
+    which = host(SCRIPT_DIR)
     try:
-        return json.loads(manifest.read_text(encoding="utf-8")).get("version")
+        if which == "claude":
+            manifest = SCRIPT_DIR.parent / ".claude-plugin" / "plugin.json"
+            return json.loads(manifest.read_text(encoding="utf-8")).get("version")
+        if which == "codex":
+            return (SCRIPT_DIR / "VERSION").read_text(encoding="utf-8").strip()
     except (OSError, ValueError):
         return None
+    return None
 
 
 def version_warning(project):
@@ -106,7 +117,8 @@ def version_warning(project):
         return None
     if local and local != plug:
         return (f"note: .lore/ hook scripts are from lore {local}, plugin is "
-                f"{plug} -- re-run /lore:init to refresh the pre-push hook.")
+                f"{plug} -- re-run {setup_cmd('--hook')} to refresh the "
+                "pre-push hook.")
     return None
 
 
@@ -248,21 +260,23 @@ def hook_warning(project, cfg):
             continue
     if not wired:
         if custom:
-            return ("note: core.hooksPath is set, so /lore:init could not "
-                    "install the pre-push secret scan -- add `python "
+            return (f"note: core.hooksPath is set, so {setup_cmd('--hook')} "
+                    "could not install the pre-push secret scan -- add `python "
                     ".lore/scan_secrets.py --quiet || exit 1` to your own "
                     "pre-push hook.")
         if not hook.is_file():
             return ("warning: no pre-push hook -- nothing scans the store for "
-                    "secrets before it is published. Run /lore:init to "
-                    "install it.")
+                    f"secrets before it is published. Run "
+                    f"{setup_cmd('--hook')} to install it.")
         return ("warning: a pre-push hook exists but does not run the secret "
-                "scan -- /lore:init never overwrites one it did not write. Add "
+                f"scan -- {setup_cmd('--hook')} never overwrites one it did "
+                "not write. Add "
                 "`python .lore/scan_secrets.py --quiet || exit 1` to it, or to "
                 "the pre-push stage of the hook manager it hands off to.")
     if not (project / ".lore" / "scan_secrets.py").is_file():
         return ("warning: the pre-push hook runs .lore/scan_secrets.py, which "
-                "is missing -- every push skips the scan. Re-run /lore:init.")
+                f"is missing -- every push skips the scan. Re-run "
+                f"{setup_cmd('--hook')}.")
     return None
 
 
@@ -890,7 +904,10 @@ def cmd_stats(entries, project, cfg, store, consolidated=()):
             print(f"    {n:4d}x surfaced, read {r}x  {p}")
         tail = "   -> tags may not match how you prompt" if never else ""
         print(f"    never surfaced: {never}{tail}")
-        if unread is None:
+        if unread is None and host(SCRIPT_DIR) == "codex":
+            print("    reads: not tracked on Codex (it has no Read tool to "
+                  "hook, so only surfacings are logged)")
+        elif unread is None:
             print("    reads: none logged yet (they come from the PostToolUse "
                   "Read hook -> reinstall the plugin if it isn't running)")
         else:
@@ -1025,7 +1042,8 @@ def main():
     has_personal = personal is not None and personal.is_dir()
     if not store.is_dir():
         if not has_personal:
-            print(f"No learnings store at {store} - run /lore:init first.")
+            print(f"No learnings store at {store} - run "
+                  f"{setup_cmd('--store')} first.")
             return 0
         if args.index:
             # --index regenerates the team store's README; there is no team

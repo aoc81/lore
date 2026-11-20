@@ -9,12 +9,13 @@ from unittest import mock
 
 import _util  # noqa: F401  (puts plugin/scripts on sys.path)
 from _common import (DEFAULTS, _FM_HEAD_CHARS, config_issues,
-                     find_project_dir, fold, git_dirs, is_under, iter_entries,
+                     find_project_dir, fold, git_dirs, host, is_under,
+                     iter_entries,
                      iter_store_entries, load_config, norm_rel,
                      parse_frontmatter, personal_store, read_frontmatter,
                      host_unsafe_keys, ref_exists, ref_matches, rel_path,
-                     revisit_due, shell_safe, stale_after_days, store_dirs,
-                     words)
+                     revisit_due, setup_cmd, shell_safe, stale_after_days,
+                     store_dirs, words)
 from _util import write_entry
 
 
@@ -463,6 +464,45 @@ class TestRelPathAndIsUnder(unittest.TestCase):
             self.assertTrue(is_under(proj, proj / "a" / "b.md"))
             self.assertTrue(is_under(proj, proj))
             self.assertFalse(is_under(proj / "a", proj / "b" / "c.md"))
+
+
+
+class TestHost(unittest.TestCase):
+    """Which install runs the scripts decides which command a message names."""
+
+    def _dir(self, *parts):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        d = Path(td.name, *parts)
+        d.mkdir(parents=True)
+        return d
+
+    def test_claude_plugin_tree(self):
+        d = self._dir("plugin", "scripts")
+        (d.parent / ".claude-plugin").mkdir()
+        (d.parent / ".claude-plugin" / "plugin.json").write_text("{}")
+        self.assertEqual(host(d), "claude")
+        self.assertEqual(setup_cmd("--hook", d), "/lore:init")
+
+    def test_codex_install(self):
+        d = self._dir(".codex", "lore")
+        (d / "VERSION").write_text("1.0.0\n")
+        self.assertEqual(host(d), "codex")
+        self.assertIn("codex/install.py --hook", setup_cmd("--hook", d))
+        self.assertNotIn("/lore:init", setup_cmd("--hook", d))
+
+    def test_project_copies_name_both(self):
+        # .lore/ is stamped too, but either host may have written it: the
+        # pre-push hook and CI run from there and must not guess.
+        d = self._dir("repo", ".lore")
+        (d / "VERSION").write_text("1.0.0\n")
+        self.assertIsNone(host(d))
+        msg = setup_cmd("--hook", d)
+        self.assertIn("/lore:init", msg)
+        self.assertIn("codex/install.py --hook", msg)
+
+    def test_the_shipped_tree_is_claude(self):
+        self.assertEqual(host(), "claude")
 
 
 if __name__ == "__main__":

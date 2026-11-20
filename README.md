@@ -87,6 +87,7 @@ From a clone of this repo — install once per machine, then trust the hooks in 
 python3 codex/install.py        # registers recall + capture hooks under ~/.codex
 # open Codex → /hooks → trust the two hooks
 python3 codex/install.py --store   # per project: scaffold ./learnings (optional)
+python3 codex/install.py --hook    # per repo: pre-push secret scan (recommended)
 ```
 
 Codex uses the same `UserPromptSubmit` / `Stop` + `additionalContext` contract, so recall
@@ -184,10 +185,10 @@ just whoever installed the git hook (see [Security](#security)).
 | `/lore:scan [path]` | Scan the store for committed secrets (the pre-push guard, run on demand). |
 
 These are **Claude Code** slash commands. On Codex there are no `/lore:*` commands —
-`init` is `python3 codex/install.py`, `capture` is the `lore` skill + the `Stop` hook,
-and `lint`/`mine`/`consolidate` are direct
-`python3 ~/.codex/lore/{verify_refs,mine_history,consolidate}.py` calls (see
-[codex/README.md](codex/README.md)).
+`init` is `python3 codex/install.py` (`--store`, `--hook`, `--ci`), `capture` is the
+`lore` skill + the `Stop` hook, and the rest are direct
+`python3 ~/.codex/lore/<script>.py` calls; [codex/README.md](codex/README.md) maps
+every command.
 
 ## The learnings format
 
@@ -374,7 +375,7 @@ is effectively **published the moment it's written**. The plugin is built around
   `python .lore/scan_secrets.py` and `python .lore/verify_refs.py --strict` on every
   PR — from the `.lore/` copies already committed to the repo, so CI and the local
   hook can't drift apart, and nobody else installs anything. On Codex:
-  `python3 codex/install.py --ci`. If you'd rather wire it by hand, the file is
+  `python3 codex/install.py --hook` for the pre-push scan and `--ci` for the workflow. If you'd rather wire it by hand, the file is
   [plugin/templates/lore-ci.yml](plugin/templates/lore-ci.yml).
 - **Recall never echoes bodies.** The recall hook matches only `title` + `tags` and emits
   only paths + titles — store content is never auto-injected verbatim, which limits the

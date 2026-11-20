@@ -43,8 +43,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (LOG_NAME, body_words, find_project_dir,  # noqa: E402
                      host_unsafe_keys, iter_consolidated, iter_entries,
                      load_config, norm_rel, personal_store, rel_path,
-                     resolve_consolidated, shell_safe, skill_cites,
-                     store_dirs)
+                     resolve_consolidated, setup_cmd, shell_safe,
+                     skill_cites, store_dirs)
 from recall import match_by_file, rank_matches  # noqa: E402
 
 SNAPSHOT_VERSION = 2
@@ -628,7 +628,8 @@ def main():
     store = Path(project) / cfg["storeDir"]
     personal = personal_store(project, cfg)
     if not store.is_dir() and not (personal is not None and personal.is_dir()):
-        print(f"No learnings store at {store} - run /lore:init first.")
+        print(f"No learnings store at {store} - run "
+              f"{setup_cmd('--store')} first.")
         return 0
     entries = _entries(project, cfg)
     consolidated = list(iter_consolidated(project, cfg))
